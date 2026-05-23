@@ -123,20 +123,24 @@ Each crate has a single responsibility, is independently testable, and the depen
 
 ### 3.4 Dependency choices
 
-| Concern | Crate | Rationale |
-|---|---|---|
-| GUI | `egui` + `eframe` | fast dev, mature wgpu integration, image-editor ecosystem precedent |
-| GPU | `wgpu` | cross-platform (Vulkan/Metal/DX12), 100% Rust, near-native perf |
-| Image decode/encode | `image` | covers JPEG/PNG/TIFF/WebP, pure Rust |
-| RAW decode | `rawloader` | pure Rust, Canon/Nikon/Sony/Fuji/Pentax/Olympus subset |
-| EXIF | `kamadak-exif` or `exif-rs` | pure Rust |
-| Catalog DB | `redb` | pure Rust embedded KV store, ACID, copy-on-write |
-| Serde | `serde` + `bincode` (DB) / `serde_json` (preset export) | standard |
-| Hashing | `blake3` | fast content hash for file relink detection |
-| Parallelism | `rayon` + `crossbeam-channel` | producer-consumer pipeline |
-| Error handling | `thiserror` (libs) + `anyhow` (binary) | Rust convention |
-| Profiling | `puffin` | dev-time perf inspection |
-| Tests | `cargo-nextest` + custom golden image diff | fast, deterministic |
+Versions are minimums verified current as of 2026-05-23.
+
+| Concern | Crate | Min version | Rationale |
+|---|---|---|---|
+| GUI | `egui` + `eframe` | 0.33 | fast dev, mature wgpu integration, image-editor ecosystem precedent. Uses the new `App::ui` API (replaced `App::update` in 0.33). MSRV 1.92. |
+| GPU | `wgpu` | 29.0 | cross-platform (Vulkan/Metal/DX12), 100% Rust, near-native perf. New `CurrentSurfaceTexture` enum and `WriteOnly<[u8]>` mapping API. MSRV 1.87. |
+| Image decode/encode | `image` | 0.25 | covers JPEG/PNG/TIFF/WebP, pure Rust |
+| RAW decode | `rawloader` | 0.37 | pure Rust, Canon/Nikon/Sony/Fuji/Pentax/Olympus subset. `quickraw` is a viable alternative if rawloader gaps appear during development. |
+| EXIF | `kamadak-exif` | 0.6 | pure Rust |
+| Catalog DB | `redb` | 4.1 | pure Rust embedded KV store, ACID, copy-on-write B+tree. Recent perf improvements in 4.1. |
+| Serde | `serde` + `bincode` (DB) / `serde_json` (preset export) | latest | standard |
+| Hashing | `blake3` | 1.x | fast content hash for file relink detection |
+| Parallelism | `rayon` + `crossbeam-channel` | latest | producer-consumer pipeline |
+| Error handling | `thiserror` (libs) + `anyhow` (binary) | latest | Rust convention |
+| Profiling | `puffin` | latest | dev-time perf inspection |
+| Tests | `cargo-nextest` + custom golden image diff | latest | fast, deterministic |
+
+The workspace's `rust-toolchain.toml` will pin to 1.92 or later to cover the strictest MSRV in the dependency set (egui).
 
 ### 3.5 Pure-Rust commitment
 
@@ -441,6 +445,10 @@ The `puffin` profiler is wired in in debug builds and exposed under `Help → Pe
 - Cross-photo settings copy/paste.
 - Perspective transform under Geometry.
 
-## 11. Open Questions
+## 11. Related Prior Art
+
+[`RapidRAW`](https://github.com/CyberTimon/RapidRAW) (2026) is a recent and similar project: non-destructive, GPU-accelerated RAW editor in Rust, also using `wgpu` and `rawloader`. It differs from `chalkraw-rs` in its UI stack — RapidRAW uses Tauri + React, while `chalkraw-rs` uses `egui` for a pure-Rust UI with smaller binaries and fewer transitive dependencies. RapidRAW is a useful reference for shader strategy and is worth reviewing during implementation.
+
+## 12. Open Questions
 
 None at design close. All decisions in this document reflect choices the user explicitly confirmed during brainstorming.
