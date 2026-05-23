@@ -7,7 +7,7 @@ pub mod uniforms;
 
 pub use device::*;
 pub use error::*;
-// pub use pipeline::*; // re-enable in Task 12
+pub use pipeline::*;
 // pub use readback::*; // re-enable in Task 13
 pub use source::*;
 pub use uniforms::*;
