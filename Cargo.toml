@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/chalkraw-core",
+    "crates/chalkraw-io",
+    "crates/chalkraw-catalog",
+    "crates/chalkraw-render",
+    "crates/chalkraw-export",
+    "crates/chalkraw-ui",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+rust-version = "1.92"
+
+[workspace.dependencies]
+# Internal crates
+chalkraw-core = { path = "crates/chalkraw-core" }
+chalkraw-io = { path = "crates/chalkraw-io" }
+chalkraw-catalog = { path = "crates/chalkraw-catalog" }
+chalkraw-render = { path = "crates/chalkraw-render" }
+chalkraw-export = { path = "crates/chalkraw-export" }
+
+# Data
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+blake3 = "1"
+
+# IO / images
+image = "0.25"
+rawloader = "0.37"
+kamadak-exif = "0.6"
+
+# DB
+redb = "4.1"
+
+# GPU
+wgpu = "29"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+
+# UI
+eframe = { version = "0.33", default-features = false, features = ["wgpu", "default_fonts"] }
+egui = "0.33"
+egui-wgpu = "0.33"
+
+# Concurrency
+rayon = "1"
+crossbeam-channel = "0.5"
+
+# Errors / logging / testing
+thiserror = "2"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
