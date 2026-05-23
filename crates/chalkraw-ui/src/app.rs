@@ -84,14 +84,14 @@ impl ChalkrawApp {
     fn ensure_gpu(&mut self, frame: &eframe::Frame) {
         if self.gpu.is_some() { return; }
 
-        // egui-wgpu 0.33.3: `frame.wgpu_render_state()` returns
+        // egui-wgpu 0.34: `frame.wgpu_render_state()` returns
         // `Option<&egui_wgpu::RenderState>`, NOT `Option<Arc<...>>`.
         let render_state = match frame.wgpu_render_state() {
             Some(rs) => rs,
             None => return,
         };
 
-        // egui-wgpu 0.33.3 / wgpu 27: `RenderState.device` and `.queue` are plain
+        // egui-wgpu 0.34 / wgpu 29: `RenderState.device` and `.queue` are plain
         // `wgpu::Device` / `wgpu::Queue` (both derive `Clone`; the clone is a
         // cheap internal Arc clone), not wrapped in `Arc<...>` themselves.
         // `RenderDevice::from_shared` wants `Arc<Device>` + `Arc<Queue>`,
@@ -109,13 +109,26 @@ impl ChalkrawApp {
 }
 
 impl eframe::App for ChalkrawApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    /// Non-UI work: GPU initialisation and debounced autosave.
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.ensure_gpu(frame);
 
-        egui::TopBottomPanel::top("menu").show(ctx, |ui| {
+        // Debounced autosave; request a repaint slightly past the debounce so we
+        // get woken even when the user has stopped interacting.
+        self.state.flush_if_due();
+        if self.state.dirty_since.is_some() {
+            ctx.request_repaint_after(DEBOUNCE + Duration::from_millis(20));
+        }
+    }
+
+    /// UI: panel layout using egui 0.34's show_inside API.
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::Panel::top("menu").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Quit").clicked() { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close); }
+                    if ui.button("Quit").clicked() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 });
                 ui.menu_button("Library", |ui| { ui.label("(Phase 3)"); });
                 ui.menu_button("Develop", |ui| { ui.label("(Phase 2)"); });
@@ -125,22 +138,22 @@ impl eframe::App for ChalkrawApp {
             });
         });
 
-        egui::SidePanel::left("left").default_width(220.0).show(ctx, |ui| {
+        egui::Panel::left("left").default_size(220.0).show_inside(ui, |ui| {
             left_panel(ui, &mut self.state);
         });
 
         let mut edit_changed = false;
-        egui::SidePanel::right("right").default_width(280.0).show(ctx, |ui| {
+        egui::Panel::right("right").default_size(280.0).show_inside(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 edit_changed = right_panel(ui, &mut self.state.edit);
             });
         });
 
-        egui::TopBottomPanel::bottom("filmstrip").default_height(120.0).show(ctx, |ui| {
+        egui::Panel::bottom("filmstrip").default_size(120.0).show_inside(ui, |ui| {
             ui.label("Filmstrip (Phase 3)");
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             if let Some(gpu) = self.gpu.as_ref() {
                 if edit_changed {
                     gpu.update(&self.state.edit);
@@ -148,26 +161,18 @@ impl eframe::App for ChalkrawApp {
                 }
                 let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
 
-                // egui-wgpu 0.33.3: `Callback::new_paint_callback` returns
-                // `epaint::PaintCallback`, which does NOT implement `Into<Shape>`
-                // directly. Wrap it in `egui::Shape::Callback(...)` to satisfy
-                // `painter.add(impl Into<Shape>)`.
-                ui.painter().add(egui::Shape::Callback(
+                // egui-wgpu 0.34 / epaint 0.34: `Callback::new_paint_callback`
+                // returns `epaint::PaintCallback`, which implements `From<PaintCallback>
+                // for Shape`, so it can be passed directly to `painter.add(...)`.
+                ui.painter().add(
                     egui_wgpu::Callback::new_paint_callback(
                         rect,
                         CanvasCallback { gpu: gpu.clone() },
                     )
-                ));
+                );
             } else {
                 ui.label("Initialising GPU…");
             }
         });
-
-        // Debounced autosave; request a repaint slightly past the debounce so we
-        // get woken even when the user has stopped interacting.
-        self.state.flush_if_due();
-        if self.state.dirty_since.is_some() {
-            ctx.request_repaint_after(DEBOUNCE + Duration::from_millis(20));
-        }
     }
 }
