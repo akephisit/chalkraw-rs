@@ -3,8 +3,8 @@
 // error type for surface creation is wgpu::CreateSurfaceError.
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
-    #[error("no GPU adapter available")]
-    NoAdapter,
+    #[error("no GPU adapter: {0}")]
+    NoAdapter(String),
 
     #[error("device request failed: {0}")]
     DeviceRequest(#[from] wgpu::RequestDeviceError),

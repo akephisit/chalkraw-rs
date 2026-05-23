@@ -33,7 +33,7 @@ impl RenderDevice {
                 force_fallback_adapter: false,
             })
             .await
-            .map_err(|_| RenderError::NoAdapter)?;
+            .map_err(|e| RenderError::NoAdapter(e.to_string()))?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("chalkraw render device"),
@@ -63,8 +63,8 @@ mod tests {
         // as a skipped test rather than a hard failure.
         match RenderDevice::new_headless() {
             Ok(_) => {}
-            Err(RenderError::NoAdapter) => {
-                eprintln!("skipping: no GPU adapter available in this environment");
+            Err(RenderError::NoAdapter(msg)) => {
+                eprintln!("skipping: no GPU adapter available: {msg}");
             }
             Err(e) => panic!("unexpected init failure: {e}"),
         }
