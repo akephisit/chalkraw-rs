@@ -1,9 +1,9 @@
-// chalkraw-rs develop shader — Phase 2B: HSL per-band adjustments added.
+// chalkraw-rs develop shader — Phase 2C: Color Grading (shadows/midtones/highlights/global).
 // Operations are applied in Lightroom order: WB → Exposure → Contrast →
-// Highlights/Shadows/Whites/Blacks → Saturation → HSL → Vibrance → Vignette → Grain.
+// Highlights/Shadows/Whites/Blacks → Saturation → HSL → Color Grading → Vibrance → Vignette → Grain.
 //
 // The WGSL struct layout must stay byte-for-byte in sync with EditUniforms in
-// uniforms.rs (total 224 bytes). WGSL alignment rules:
+// uniforms.rs (total 288 bytes). WGSL alignment rules:
 //   vec4<f32> → align 16, size 16
 //   vec3<f32> → align 16, size 12
 //   vec2<f32> → align  8, size  8
@@ -42,7 +42,12 @@
 // 176   hsl_sat_b      vec4<f32>
 // 192   hsl_lum_a      vec4<f32>
 // 208   hsl_lum_b      vec4<f32>
-// Total: 224 bytes.
+// Phase 2C (Color Grading): 4 regions × {hue, sat, lum} + blending/balance, 4 × vec4<f32> = 64 bytes.
+// 224   cg_hue         vec4<f32>   hue for [shadows, midtones, highlights, global]
+// 240   cg_sat         vec4<f32>   saturation for [shadows, midtones, highlights, global]
+// 256   cg_lum         vec4<f32>   luminance for [shadows, midtones, highlights, global]
+// 272   cg_blend_balance vec4<f32> [blending, balance, 0, 0]
+// Total: 288 bytes.
 
 struct EditUniforms {
     exposure:           f32,
@@ -75,6 +80,11 @@ struct EditUniforms {
     hsl_sat_b:          vec4<f32>,
     hsl_lum_a:          vec4<f32>,
     hsl_lum_b:          vec4<f32>,
+    // Phase 2C: Color Grading (4 × vec4<f32>, offset 224..288).
+    cg_hue:             vec4<f32>,   // hue for [shadows, midtones, highlights, global]
+    cg_sat:             vec4<f32>,   // saturation for [shadows, midtones, highlights, global]
+    cg_lum:             vec4<f32>,   // luminance for [shadows, midtones, highlights, global]
+    cg_blend_balance:   vec4<f32>,   // [blending, balance, 0, 0]
 };
 
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
@@ -96,6 +106,18 @@ fn hsv_to_rgb(c: vec3<f32>) -> vec3<f32> {
     let K = vec4<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
     let p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
     return c.z * mix(K.xxx, clamp(p - K.xxx, vec3<f32>(0.0), vec3<f32>(1.0)), c.y);
+}
+
+// ── Color Grading helper ──────────────────────────────────────────────────────
+
+// Convert a (hue_deg, sat) pair into a small additive RGB tint offset.
+// hue_deg is 0..360, sat is 0..100.  The (rgb - 0.5) * scale approach gives
+// a Lightroom-style additive colour grading tint rather than a full hue rotate.
+fn cg_tint_rgb(hue_deg: f32, sat: f32) -> vec3<f32> {
+    let h01 = fract(hue_deg / 360.0);
+    let rgb = hsv_to_rgb(vec3<f32>(h01, 1.0, 1.0));
+    let neutral = vec3<f32>(0.5);
+    return (rgb - neutral) * (sat / 100.0) * 0.25;
 }
 
 struct VertexOut {
@@ -207,7 +229,39 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         rgb = hsv_to_rgb(hsv_out);
     }
 
-    // 6. Vibrance — saturation boost weighted against already-saturated colours.
+    // 6. Color Grading — per-region tint (shadows/midtones/highlights/global) plus
+    //    per-region luminance offsets. Weights driven by pixel luminance with
+    //    smoothstep falloff; balance slides the shadow/highlight pivot.
+    {
+        let cg_lum_in = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let balance   = edit.cg_blend_balance.y / 100.0;   // -1..1
+        let blend     = edit.cg_blend_balance.x / 100.0;   //  0..1 (default 0.5)
+        let pivot_low  = 0.25 + balance * 0.25;
+        let pivot_high = 0.75 + balance * 0.25;
+        let feather    = mix(0.05, 0.4, clamp(blend, 0.0, 1.0));
+
+        let sh_w  = 1.0 - smoothstep(pivot_low - feather, pivot_low + feather, cg_lum_in);
+        let hi_w  = smoothstep(pivot_high - feather, pivot_high + feather, cg_lum_in);
+        let mid_w = max(0.0, 1.0 - sh_w - hi_w);
+
+        // Per-region tint offsets.
+        let sh_tint  = cg_tint_rgb(edit.cg_hue.x, edit.cg_sat.x);
+        let mid_tint = cg_tint_rgb(edit.cg_hue.y, edit.cg_sat.y);
+        let hi_tint  = cg_tint_rgb(edit.cg_hue.z, edit.cg_sat.z);
+        let gl_tint  = cg_tint_rgb(edit.cg_hue.w, edit.cg_sat.w);
+
+        rgb = rgb + sh_tint * sh_w + mid_tint * mid_w + hi_tint * hi_w + gl_tint;
+
+        // Per-region luminance shift (-100..100 each); halved to avoid blow-out.
+        let lum_shift =
+              edit.cg_lum.x * sh_w
+            + edit.cg_lum.y * mid_w
+            + edit.cg_lum.z * hi_w
+            + edit.cg_lum.w;
+        rgb = rgb * (1.0 + lum_shift / 100.0 * 0.5);
+    }
+
+    // 7. Vibrance — saturation boost weighted against already-saturated colours.
     let max_c = max(max(rgb.r, rgb.g), rgb.b);
     let min_c = min(min(rgb.r, rgb.g), rgb.b);
     let cur_sat = max_c - min_c;
@@ -215,7 +269,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let gray_vib = vec3<f32>(dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722)));
     rgb = mix(gray_vib, rgb, 1.0 + edit.vibrance / 100.0 * vib_weight);
 
-    // 7. Vignette — radial darkening around image centre.
+    // 8. Vignette — radial darkening around image centre.
     //    vignette_roundness shifts the Minkowski metric: p=2 (circular) to p=8
     //    (more square). Aspect-ratio correction is deferred to Phase 2F.
     let centre = vec2<f32>(0.5, 0.5);
@@ -228,7 +282,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let vig_factor = 1.0 + vig_mask * edit.vignette_amount / 100.0;
     rgb *= vig_factor;
 
-    // 8. Grain — single-octave hash noise.
+    // 9. Grain — single-octave hash noise.
     //    grain_roughness is passed through to the uniform buffer but has no
     //    shader effect in Phase 2A; reserved for multi-octave noise in Phase 2E.
     let scale = mix(50.0, 500.0, 1.0 - edit.grain_size / 100.0);

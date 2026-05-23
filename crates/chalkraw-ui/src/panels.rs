@@ -164,7 +164,61 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
     // ── Color Grading (Phase 2C) ──────────────────────────────────────────────
     egui::CollapsingHeader::new("Color Grading")
         .default_open(false)
-        .show(ui, |ui| { ui.label("(Phase 2C)"); });
+        .show(ui, |ui| {
+            // Shadows
+            egui::CollapsingHeader::new("Shadows")
+                .id_salt("cg_0")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label("Hue");
+                    if ui.add(egui::Slider::new(&mut edit.color_grading.shadows.hue, 0.0..=360.0).fixed_decimals(0).suffix("°")).changed() { changed = true; }
+                    ui.label("Saturation");
+                    if ui.add(egui::Slider::new(&mut edit.color_grading.shadows.saturation, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    ui.label("Luminance");
+                    if ui.add(egui::Slider::new(&mut edit.color_grading.shadows.luminance, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                });
+            // Midtones
+            egui::CollapsingHeader::new("Midtones")
+                .id_salt("cg_1")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label("Hue");
+                    if ui.add(egui::Slider::new(&mut edit.color_grading.midtones.hue, 0.0..=360.0).fixed_decimals(0).suffix("°")).changed() { changed = true; }
+                    ui.label("Saturation");
+                    if ui.add(egui::Slider::new(&mut edit.color_grading.midtones.saturation, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    ui.label("Luminance");
+                    if ui.add(egui::Slider::new(&mut edit.color_grading.midtones.luminance, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                });
+            // Highlights
+            egui::CollapsingHeader::new("Highlights")
+                .id_salt("cg_2")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label("Hue");
+                    if ui.add(egui::Slider::new(&mut edit.color_grading.highlights.hue, 0.0..=360.0).fixed_decimals(0).suffix("°")).changed() { changed = true; }
+                    ui.label("Saturation");
+                    if ui.add(egui::Slider::new(&mut edit.color_grading.highlights.saturation, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    ui.label("Luminance");
+                    if ui.add(egui::Slider::new(&mut edit.color_grading.highlights.luminance, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                });
+            // Global
+            egui::CollapsingHeader::new("Global")
+                .id_salt("cg_3")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label("Hue");
+                    if ui.add(egui::Slider::new(&mut edit.color_grading.global.hue, 0.0..=360.0).fixed_decimals(0).suffix("°")).changed() { changed = true; }
+                    ui.label("Saturation");
+                    if ui.add(egui::Slider::new(&mut edit.color_grading.global.saturation, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    ui.label("Luminance");
+                    if ui.add(egui::Slider::new(&mut edit.color_grading.global.luminance, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                });
+            ui.separator();
+            ui.label("Blending");
+            if ui.add(egui::Slider::new(&mut edit.color_grading.blending, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+            ui.label("Balance");
+            if ui.add(egui::Slider::new(&mut edit.color_grading.balance, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+        });
 
     // ── Detail (Phase 2E) ─────────────────────────────────────────────────────
     egui::CollapsingHeader::new("Detail")

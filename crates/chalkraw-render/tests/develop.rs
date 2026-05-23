@@ -227,6 +227,79 @@ fn hsl_blue_saturation_minus_100_desaturates_only_blue() {
     );
 }
 
+/// Color Grading — blue shadows tint on a dark pixel (0.2 grey):
+/// shadows.hue=240 (blue), shadows.saturation=100 → output B > R.
+#[test]
+fn cg_shadows_blue_tints_dark_pixels() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skipping: no GPU"); return; }
+    };
+    let (w, h) = (16, 16);
+    let mut edit = EditState::default();
+    edit.color_grading.shadows.hue = 240.0;        // blue
+    edit.color_grading.shadows.saturation = 100.0;
+
+    let pixels = render_solid(&rd, w, h, solid_grey(w, h, 0.2), &edit);
+    let p = pixel_at(&pixels, w, 8, 8);
+
+    assert!(
+        p[2] > p[0],
+        "cg shadows blue tint on dark pixel should produce B > R; got R={} G={} B={}",
+        p[0], p[1], p[2]
+    );
+}
+
+/// Color Grading — yellow highlights tint on a light pixel (0.8 grey):
+/// highlights.hue=60 (yellow), highlights.saturation=100 → output R+G > B.
+#[test]
+fn cg_highlights_yellow_tints_light_pixels() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skipping: no GPU"); return; }
+    };
+    let (w, h) = (16, 16);
+    let mut edit = EditState::default();
+    edit.color_grading.highlights.hue = 60.0;        // yellow
+    edit.color_grading.highlights.saturation = 100.0;
+
+    let pixels = render_solid(&rd, w, h, solid_grey(w, h, 0.8), &edit);
+    let p = pixel_at(&pixels, w, 8, 8);
+
+    let rg_sum = p[0] as u32 + p[1] as u32;
+    let b = p[2] as u32;
+    assert!(
+        rg_sum > b * 2,
+        "cg highlights yellow tint on light pixel should produce R+G > B; got R={} G={} B={}",
+        p[0], p[1], p[2]
+    );
+}
+
+/// Color Grading — global luminance -50 should darken any pixel.
+#[test]
+fn cg_global_lum_minus_50_darkens_all() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skipping: no GPU"); return; }
+    };
+    let (w, h) = (16, 16);
+
+    let base_edit = EditState::default();
+    let base_pixels = render_solid(&rd, w, h, solid_grey(w, h, 0.5), &base_edit);
+    let base_p = pixel_at(&base_pixels, w, 8, 8);
+
+    let mut edit = EditState::default();
+    edit.color_grading.global.luminance = -50.0;
+    let pixels = render_solid(&rd, w, h, solid_grey(w, h, 0.5), &edit);
+    let p = pixel_at(&pixels, w, 8, 8);
+
+    assert!(
+        p[0] < base_p[0],
+        "cg global luminance -50 should darken pixel; got {} (was {})",
+        p[0], base_p[0]
+    );
+}
+
 /// Vibrance=+100 on a near-grey pixel should boost saturation more than
 /// Vibrance=0, but not exceed what full Saturation=+100 would do.
 #[test]

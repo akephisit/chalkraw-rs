@@ -38,7 +38,12 @@ use chalkraw_core::EditState;
 /// 176  hsl_sat_b        [f32;4]
 /// 192  hsl_lum_a        [f32;4]
 /// 208  hsl_lum_b        [f32;4]
-/// Total: 224 bytes
+/// Phase 2C (Color Grading): 4 regions × {hue, sat, lum} + blending/balance.
+/// 224  cg_hue           [f32;4]  hue for [shadows, midtones, highlights, global]
+/// 240  cg_sat           [f32;4]  saturation for [shadows, midtones, highlights, global]
+/// 256  cg_lum           [f32;4]  luminance for [shadows, midtones, highlights, global]
+/// 272  cg_blend_balance [f32;4]  [blending, balance, 0, 0]
+/// Total: 288 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct EditUniforms {
@@ -77,6 +82,11 @@ pub struct EditUniforms {
     pub hsl_sat_b: [f32; 4],   // offset 176
     pub hsl_lum_a: [f32; 4],   // offset 192
     pub hsl_lum_b: [f32; 4],   // offset 208
+    // Phase 2C (Color Grading): 4 regions × {hue, sat, lum} + blending/balance.
+    pub cg_hue: [f32; 4],          // offset 224  hue for [shadows, midtones, highlights, global]
+    pub cg_sat: [f32; 4],          // offset 240  saturation for [shadows, midtones, highlights, global]
+    pub cg_lum: [f32; 4],          // offset 256  luminance for [shadows, midtones, highlights, global]
+    pub cg_blend_balance: [f32; 4], // offset 272  [blending, balance, 0, 0]
 }
 
 impl From<&EditState> for EditUniforms {
@@ -84,6 +94,7 @@ impl From<&EditState> for EditUniforms {
         // HSL: 8 bands in order red(0), orange(1), yellow(2), green(3),
         //                       aqua(4), blue(5), purple(6), magenta(7).
         let h = &e.hsl;
+        let cg = &e.color_grading;
         Self {
             exposure: e.tone.exposure,
             _pre_pad: [0.0; 3],
@@ -116,6 +127,11 @@ impl From<&EditState> for EditUniforms {
             hsl_sat_b: [h[4].saturation, h[5].saturation, h[6].saturation, h[7].saturation],
             hsl_lum_a: [h[0].luminance, h[1].luminance, h[2].luminance, h[3].luminance],
             hsl_lum_b: [h[4].luminance, h[5].luminance, h[6].luminance, h[7].luminance],
+            // Phase 2C: Color Grading — 4 regions: shadows(0), midtones(1), highlights(2), global(3).
+            cg_hue: [cg.shadows.hue, cg.midtones.hue, cg.highlights.hue, cg.global.hue],
+            cg_sat: [cg.shadows.saturation, cg.midtones.saturation, cg.highlights.saturation, cg.global.saturation],
+            cg_lum: [cg.shadows.luminance, cg.midtones.luminance, cg.highlights.luminance, cg.global.luminance],
+            cg_blend_balance: [cg.blending, cg.balance, 0.0, 0.0],
         }
     }
 }
@@ -126,12 +142,13 @@ mod tests {
 
     #[test]
     fn edit_uniforms_size_matches_wgsl() {
-        // Must be 224 bytes to match the WGSL EditUniforms struct layout.
+        // Must be 288 bytes to match the WGSL EditUniforms struct layout.
         // Phase 2A: 128 bytes. Phase 2B adds 6 × vec4<f32> = 96 bytes → 224.
+        // Phase 2C adds 4 × vec4<f32> = 64 bytes → 288.
         // If this fails, check that the Rust and WGSL fields are in sync.
         assert_eq!(
             std::mem::size_of::<EditUniforms>(),
-            224,
+            288,
             "EditUniforms size mismatch — Rust and WGSL structs are out of sync"
         );
     }
