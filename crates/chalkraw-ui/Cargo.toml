@@ -1,0 +1,24 @@
+[package]
+name = "chalkraw-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "chalkraw"
+path = "src/main.rs"
+
+[dependencies]
+chalkraw-core = { workspace = true }
+chalkraw-io = { workspace = true }
+chalkraw-catalog = { workspace = true }
+chalkraw-render = { workspace = true }
+chalkraw-export = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+wgpu = { workspace = true }
+anyhow = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }

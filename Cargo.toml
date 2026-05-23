@@ -45,7 +45,7 @@ bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 
 # UI
-eframe = { version = "0.33", default-features = false, features = ["wgpu", "default_fonts"] }
+eframe = { version = "0.33", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
 egui = "0.33"
 egui-wgpu = "0.33"
 

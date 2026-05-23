@@ -1,0 +1,13 @@
+[package]
+name = "chalkraw-export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+chalkraw-core = { workspace = true }
+chalkraw-render = { workspace = true }
+chalkraw-io = { workspace = true }
+chalkraw-catalog = { workspace = true }
+thiserror = { workspace = true }
