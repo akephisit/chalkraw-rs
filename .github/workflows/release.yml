@@ -58,7 +58,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release
-        run: cargo build --release --locked -p chalkraw-ui --target ${{ matrix.target }}
+        run: cargo build --release -p chalkraw-ui --target ${{ matrix.target }}
 
       - name: Stage binary
         shell: bash
