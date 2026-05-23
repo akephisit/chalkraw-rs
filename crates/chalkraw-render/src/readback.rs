@@ -26,7 +26,7 @@ pub fn read_to_cpu(
 ) -> Result<Vec<u8>, RenderError> {
     // wgpu requires 256-byte row alignment for buffer copies.
     let bytes_per_row_unpadded = width * 4;
-    let padded_row = ((bytes_per_row_unpadded + 255) / 256) * 256;
+    let padded_row = bytes_per_row_unpadded.div_ceil(256) * 256;
     let buffer_size = (padded_row * height) as u64;
 
     let buffer = rd.device.create_buffer(&wgpu::BufferDescriptor {
