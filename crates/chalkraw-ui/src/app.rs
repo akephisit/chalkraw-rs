@@ -2,13 +2,18 @@ use crate::canvas::{CanvasCallback, CanvasGpu};
 use crate::panels::{left_panel, right_panel};
 use chalkraw_catalog::Catalog;
 use chalkraw_core::{EditState, ImageFormat, Photo, PhotoId};
-use chalkraw_io::{decode_image, LinearImage};
+use chalkraw_io::{decode_image, decode_image_bytes, LinearImage};
 use chalkraw_render::RenderDevice;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const DEBOUNCE: Duration = Duration::from_millis(100);
+
+/// Embedded sample image used when no fixture path is supplied or the
+/// supplied path doesn't exist. Lets a downloaded standalone binary open
+/// without crashing the moment a user double-clicks it.
+const EMBEDDED_FIXTURE: &[u8] = include_bytes!("../../../tests/fixtures/sample.jpg");
 
 pub struct AppState {
     pub edit: EditState,
@@ -20,8 +25,17 @@ pub struct AppState {
 
 impl AppState {
     pub fn bootstrap(fixture: PathBuf, catalog_path: PathBuf) -> anyhow::Result<Self> {
-        let image = decode_image(&fixture)
-            .map_err(|e| anyhow::anyhow!("decode {fixture:?}: {e}"))?;
+        let (image, file_bytes, photo_path) = if fixture.exists() {
+            let bytes = std::fs::read(&fixture)?;
+            let img = decode_image(&fixture)
+                .map_err(|e| anyhow::anyhow!("decode {fixture:?}: {e}"))?;
+            (img, bytes, fixture.clone())
+        } else {
+            log::warn!("fixture {fixture:?} not found; loading embedded sample image");
+            let img = decode_image_bytes(EMBEDDED_FIXTURE)
+                .map_err(|e| anyhow::anyhow!("decode embedded fixture: {e}"))?;
+            (img, EMBEDDED_FIXTURE.to_vec(), PathBuf::from("<embedded>"))
+        };
         let catalog = Catalog::open_or_create(&catalog_path, "default")?;
 
         // First-run: create a Photo row for the fixture if the catalog is empty.
@@ -30,8 +44,8 @@ impl AppState {
             let e = catalog.get_edit(p.id)?;
             (p, e)
         } else {
-            let hash = *blake3::hash(&std::fs::read(&fixture)?).as_bytes();
-            let p = Photo::new(fixture.clone(), hash, image.width, image.height, ImageFormat::Jpeg);
+            let hash = *blake3::hash(&file_bytes).as_bytes();
+            let p = Photo::new(photo_path, hash, image.width, image.height, ImageFormat::Jpeg);
             catalog.insert_photo(&p)?;
             (p, EditState::default())
         };

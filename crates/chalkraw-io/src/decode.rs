@@ -1,6 +1,7 @@
 use crate::error::IoError;
 use chalkraw_core::ImageFormat;
 use image::ImageReader;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 /// Decoded source in linear sRGB, RGBA, 32-bit float per channel.
@@ -21,6 +22,31 @@ impl LinearImage {
     }
 }
 
+fn match_format(detected: Option<image::ImageFormat>, ctx: &Path) -> Result<ImageFormat, IoError> {
+    match detected {
+        Some(image::ImageFormat::Jpeg) => Ok(ImageFormat::Jpeg),
+        Some(image::ImageFormat::Png) => Ok(ImageFormat::Png),
+        Some(image::ImageFormat::Tiff) => Ok(ImageFormat::Tiff),
+        _ => Err(IoError::UnsupportedFormat(ctx.to_path_buf())),
+    }
+}
+
+// sRGB 8-bit → linear f32 0..1 via IEC 61966-2-1 piecewise transfer (threshold 0.04045).
+fn to_linear(rgba8: &image::RgbaImage) -> Vec<f32> {
+    let (w, h) = rgba8.dimensions();
+    let mut pixels = Vec::with_capacity(w as usize * h as usize * 4);
+    for &c in rgba8.as_raw() {
+        let v = c as f32 / 255.0;
+        let linear = if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        };
+        pixels.push(linear);
+    }
+    pixels
+}
+
 pub fn decode_image(path: impl AsRef<Path>) -> Result<LinearImage, IoError> {
     let path: PathBuf = path.as_ref().to_path_buf();
 
@@ -32,30 +58,30 @@ pub fn decode_image(path: impl AsRef<Path>) -> Result<LinearImage, IoError> {
         .with_guessed_format()
         .map_err(|e| IoError::DecodeFailed { path: path.clone(), source: e.into() })?;
 
-    let format = match reader.format() {
-        Some(image::ImageFormat::Jpeg) => ImageFormat::Jpeg,
-        Some(image::ImageFormat::Png) => ImageFormat::Png,
-        Some(image::ImageFormat::Tiff) => ImageFormat::Tiff,
-        _ => return Err(IoError::UnsupportedFormat(path)),
-    };
-
+    let format = match_format(reader.format(), &path)?;
     let dyn_img = reader.decode().map_err(|e| IoError::DecodeFailed { path: path.clone(), source: e })?;
     let rgba8 = dyn_img.to_rgba8();
     let (w, h) = rgba8.dimensions();
 
-    // sRGB 8-bit → linear f32 0..1 via IEC 61966-2-1 piecewise transfer (threshold 0.04045).
-    let mut pixels = Vec::with_capacity(w as usize * h as usize * 4);
-    for &c in rgba8.as_raw() {
-        let v = c as f32 / 255.0;
-        let linear = if v <= 0.04045 {
-            v / 12.92
-        } else {
-            ((v + 0.055) / 1.055).powf(2.4)
-        };
-        pixels.push(linear);
-    }
+    Ok(LinearImage { width: w, height: h, format, pixels: to_linear(&rgba8) })
+}
 
-    Ok(LinearImage { width: w, height: h, format, pixels })
+/// Decode an in-memory image. Used as a fallback when the catalog's fixture
+/// file is missing (e.g., a freshly downloaded binary launched from a folder
+/// that doesn't contain `tests/fixtures/sample.jpg`).
+pub fn decode_image_bytes(bytes: &[u8]) -> Result<LinearImage, IoError> {
+    let synthetic = PathBuf::from("<embedded>");
+
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| IoError::DecodeFailed { path: synthetic.clone(), source: e.into() })?;
+
+    let format = match_format(reader.format(), &synthetic)?;
+    let dyn_img = reader.decode().map_err(|e| IoError::DecodeFailed { path: synthetic.clone(), source: e })?;
+    let rgba8 = dyn_img.to_rgba8();
+    let (w, h) = rgba8.dimensions();
+
+    Ok(LinearImage { width: w, height: h, format, pixels: to_linear(&rgba8) })
 }
 
 #[cfg(test)]
@@ -110,5 +136,18 @@ mod tests {
         assert_eq!(img.height, 3);
         assert_eq!(img.format, ImageFormat::Tiff);
         assert_eq!(img.pixels.len(), 2 * 3 * 4);
+    }
+
+    #[test]
+    fn decodes_bytes_from_memory() {
+        let mut buf = Vec::new();
+        image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(4, 4, image::Rgba([255, 128, 64, 255]))
+            .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        let img = decode_image_bytes(&buf).expect("bytes decode");
+        assert_eq!(img.width, 4);
+        assert_eq!(img.height, 4);
+        assert_eq!(img.format, ImageFormat::Png);
+        assert_eq!(img.pixels.len(), 4 * 4 * 4);
     }
 }
