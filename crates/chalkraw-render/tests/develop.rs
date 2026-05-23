@@ -300,6 +300,54 @@ fn cg_global_lum_minus_50_darkens_all() {
     );
 }
 
+/// Parametric curve shadows=+50 on a 0.1-grey pixel (deep shadow zone) should lift it.
+#[test]
+fn parametric_shadows_plus_50_lifts_dark_pixels() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skipping: no GPU"); return; }
+    };
+    let (w, h) = (16, 16);
+
+    let base_edit = EditState::default();
+    let base_pixels = render_solid(&rd, w, h, solid_grey(w, h, 0.1), &base_edit);
+    let base_p = pixel_at(&base_pixels, w, 8, 8);
+
+    let mut edit = EditState::default();
+    edit.parametric_curve.shadows = 50.0;
+    let pixels = render_solid(&rd, w, h, solid_grey(w, h, 0.1), &edit);
+    let p = pixel_at(&pixels, w, 8, 8);
+
+    assert!(
+        p[0] > base_p[0],
+        "parametric shadows +50 should lift dark pixel (0.1 grey); got {p:?} vs base {base_p:?}"
+    );
+}
+
+/// Parametric curve highlights=-50 on a 0.9-grey pixel (bright zone) should dim it.
+#[test]
+fn parametric_highlights_minus_50_dims_bright_pixels() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skipping: no GPU"); return; }
+    };
+    let (w, h) = (16, 16);
+
+    let base_edit = EditState::default();
+    let base_pixels = render_solid(&rd, w, h, solid_grey(w, h, 0.9), &base_edit);
+    let base_p = pixel_at(&base_pixels, w, 8, 8);
+
+    let mut edit = EditState::default();
+    edit.parametric_curve.highlights = -50.0;
+    let pixels = render_solid(&rd, w, h, solid_grey(w, h, 0.9), &edit);
+    let p = pixel_at(&pixels, w, 8, 8);
+
+    assert!(
+        p[0] < base_p[0],
+        "parametric highlights -50 should dim bright pixel (0.9 grey); got {p:?} vs base {base_p:?}"
+    );
+}
+
 /// Vibrance=+100 on a near-grey pixel should boost saturation more than
 /// Vibrance=0, but not exceed what full Saturation=+100 would do.
 #[test]

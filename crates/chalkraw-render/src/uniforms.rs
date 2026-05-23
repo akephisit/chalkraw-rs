@@ -43,7 +43,9 @@ use chalkraw_core::EditState;
 /// 240  cg_sat           [f32;4]  saturation for [shadows, midtones, highlights, global]
 /// 256  cg_lum           [f32;4]  luminance for [shadows, midtones, highlights, global]
 /// 272  cg_blend_balance [f32;4]  [blending, balance, 0, 0]
-/// Total: 288 bytes
+/// Phase 2D (Parametric Curve): 1 × vec4<f32> = 16 bytes.
+/// 288  param_curve      [f32;4]  [shadows, darks, lights, highlights]
+/// Total: 304 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct EditUniforms {
@@ -87,6 +89,8 @@ pub struct EditUniforms {
     pub cg_sat: [f32; 4],          // offset 240  saturation for [shadows, midtones, highlights, global]
     pub cg_lum: [f32; 4],          // offset 256  luminance for [shadows, midtones, highlights, global]
     pub cg_blend_balance: [f32; 4], // offset 272  [blending, balance, 0, 0]
+    // Phase 2D (Parametric Curve): 1 × vec4<f32> = 16 bytes.
+    pub param_curve: [f32; 4],      // offset 288  [shadows, darks, lights, highlights]
 }
 
 impl From<&EditState> for EditUniforms {
@@ -132,6 +136,12 @@ impl From<&EditState> for EditUniforms {
             cg_sat: [cg.shadows.saturation, cg.midtones.saturation, cg.highlights.saturation, cg.global.saturation],
             cg_lum: [cg.shadows.luminance, cg.midtones.luminance, cg.highlights.luminance, cg.global.luminance],
             cg_blend_balance: [cg.blending, cg.balance, 0.0, 0.0],
+            param_curve: [
+                e.parametric_curve.shadows,
+                e.parametric_curve.darks,
+                e.parametric_curve.lights,
+                e.parametric_curve.highlights,
+            ],
         }
     }
 }
@@ -142,13 +152,14 @@ mod tests {
 
     #[test]
     fn edit_uniforms_size_matches_wgsl() {
-        // Must be 288 bytes to match the WGSL EditUniforms struct layout.
+        // Must be 304 bytes to match the WGSL EditUniforms struct layout.
         // Phase 2A: 128 bytes. Phase 2B adds 6 × vec4<f32> = 96 bytes → 224.
         // Phase 2C adds 4 × vec4<f32> = 64 bytes → 288.
+        // Phase 2D adds 1 × vec4<f32> = 16 bytes → 304.
         // If this fails, check that the Rust and WGSL fields are in sync.
         assert_eq!(
             std::mem::size_of::<EditUniforms>(),
-            288,
+            304,
             "EditUniforms size mismatch — Rust and WGSL structs are out of sync"
         );
     }

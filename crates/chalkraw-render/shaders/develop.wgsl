@@ -1,9 +1,10 @@
-// chalkraw-rs develop shader — Phase 2C: Color Grading (shadows/midtones/highlights/global).
+// chalkraw-rs develop shader — Phase 2D: Parametric Tone Curve.
 // Operations are applied in Lightroom order: WB → Exposure → Contrast →
-// Highlights/Shadows/Whites/Blacks → Saturation → HSL → Color Grading → Vibrance → Vignette → Grain.
+// Highlights/Shadows/Whites/Blacks → Saturation → HSL → Color Grading →
+// Parametric Curve → Vibrance → Vignette → Grain.
 //
 // The WGSL struct layout must stay byte-for-byte in sync with EditUniforms in
-// uniforms.rs (total 288 bytes). WGSL alignment rules:
+// uniforms.rs (total 304 bytes). WGSL alignment rules:
 //   vec4<f32> → align 16, size 16
 //   vec3<f32> → align 16, size 12
 //   vec2<f32> → align  8, size  8
@@ -47,7 +48,9 @@
 // 240   cg_sat         vec4<f32>   saturation for [shadows, midtones, highlights, global]
 // 256   cg_lum         vec4<f32>   luminance for [shadows, midtones, highlights, global]
 // 272   cg_blend_balance vec4<f32> [blending, balance, 0, 0]
-// Total: 288 bytes.
+// Phase 2D (Parametric Curve): 1 × vec4<f32> = 16 bytes.
+// 288   param_curve    vec4<f32>   [shadows, darks, lights, highlights]
+// Total: 304 bytes.
 
 struct EditUniforms {
     exposure:           f32,
@@ -85,6 +88,8 @@ struct EditUniforms {
     cg_sat:             vec4<f32>,   // saturation for [shadows, midtones, highlights, global]
     cg_lum:             vec4<f32>,   // luminance for [shadows, midtones, highlights, global]
     cg_blend_balance:   vec4<f32>,   // [blending, balance, 0, 0]
+    // Phase 2D: Parametric Curve (1 × vec4<f32>, offset 288..304).
+    param_curve:        vec4<f32>,   // [shadows, darks, lights, highlights]
 };
 
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
@@ -106,6 +111,19 @@ fn hsv_to_rgb(c: vec3<f32>) -> vec3<f32> {
     let K = vec4<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
     let p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
     return c.z * mix(K.xxx, clamp(p - K.xxx, vec3<f32>(0.0), vec3<f32>(1.0)), c.y);
+}
+
+// ── Parametric Curve helper ───────────────────────────────────────────────────
+
+// Per-zone additive lift for one channel value v (0..1).
+// p.x = shadows (-100..100), p.y = darks, p.z = lights, p.w = highlights.
+// Zone edges: 0.0, 0.33, 0.66, 1.0.  Smooth overlap at boundaries.
+fn parametric_zone_lift(v: f32, p: vec4<f32>) -> f32 {
+    let sh = 1.0 - smoothstep(0.0, 0.33, v);
+    let hi = smoothstep(0.66, 1.0, v);
+    let dk = smoothstep(0.0, 0.33, v) * (1.0 - smoothstep(0.33, 0.66, v));
+    let lt = smoothstep(0.33, 0.66, v) * (1.0 - smoothstep(0.66, 1.0, v));
+    return (sh * p.x + dk * p.y + lt * p.z + hi * p.w) / 100.0 * 0.25;
 }
 
 // ── Color Grading helper ──────────────────────────────────────────────────────
@@ -259,6 +277,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             + edit.cg_lum.z * hi_w
             + edit.cg_lum.w;
         rgb = rgb * (1.0 + lum_shift / 100.0 * 0.5);
+    }
+
+    // 6b. Parametric Tone Curve — per-zone lift, smooth falloff at zone boundaries.
+    //     Applied per channel independently (same curve for R, G, B).
+    {
+        let pc = edit.param_curve;
+        rgb.r = clamp(rgb.r + parametric_zone_lift(rgb.r, pc), 0.0, 1.0);
+        rgb.g = clamp(rgb.g + parametric_zone_lift(rgb.g, pc), 0.0, 1.0);
+        rgb.b = clamp(rgb.b + parametric_zone_lift(rgb.b, pc), 0.0, 1.0);
     }
 
     // 7. Vibrance — saturation boost weighted against already-saturated colours.

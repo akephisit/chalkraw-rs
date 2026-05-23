@@ -36,7 +36,17 @@ impl AppState {
                 .map_err(|e| anyhow::anyhow!("decode embedded fixture: {e}"))?;
             (img, EMBEDDED_FIXTURE.to_vec(), PathBuf::from("<embedded>"))
         };
-        let catalog = Catalog::open_or_create(&catalog_path, "default")?;
+        let catalog = match Catalog::open_or_create(&catalog_path, "default") {
+            Ok(c) => c,
+            Err(chalkraw_catalog::CatalogError::SchemaVersion { found, expected }) => {
+                log::warn!(
+                    "catalog schema {found} != expected {expected}; recreating {catalog_path:?}"
+                );
+                std::fs::remove_file(&catalog_path).ok();
+                Catalog::open_or_create(&catalog_path, "default")?
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         // First-run: create a Photo row for the fixture if the catalog is empty.
         let existing = catalog.list_photos()?;

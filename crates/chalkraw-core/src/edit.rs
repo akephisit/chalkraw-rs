@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-pub const EDIT_SCHEMA_VERSION: u32 = 1;
+pub const EDIT_SCHEMA_VERSION: u32 = 2;
 pub const MAX_HISTORY: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -64,6 +64,14 @@ pub struct ToneCurve {
     pub red: Curve,
     pub green: Curve,
     pub blue: Curve,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct ParametricCurve {
+    pub shadows: f32,    // identity 0, range -100..100
+    pub darks: f32,
+    pub lights: f32,
+    pub highlights: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -196,6 +204,7 @@ pub struct EditState {
     pub presence: Presence,
     pub color: ColorMix,
     pub tone_curve: ToneCurve,
+    pub parametric_curve: ParametricCurve,
     pub hsl: [HslAdjustment; 8],
     pub color_grading: ColorGrading,
     pub detail: Detail,
@@ -214,6 +223,7 @@ impl Default for EditState {
             presence: Presence::default(),
             color: ColorMix::default(),
             tone_curve: ToneCurve::default(),
+            parametric_curve: ParametricCurve::default(),
             hsl: [HslAdjustment::default(); 8],
             color_grading: ColorGrading::default(),
             detail: Detail::default(),
@@ -235,6 +245,7 @@ impl EditState {
             && self.presence == d.presence
             && self.color == d.color
             && self.tone_curve == d.tone_curve
+            && self.parametric_curve == d.parametric_curve
             && self.hsl == d.hsl
             && self.color_grading == d.color_grading
             && self.detail == d.detail
@@ -266,6 +277,16 @@ mod tests {
         let mut s = EditState::default();
         s.tone.exposure = 1.0;
         assert!(!s.is_identity());
+    }
+
+    #[test]
+    fn parametric_curve_change_breaks_identity() {
+        let mut s = EditState::default();
+        s.parametric_curve.shadows = 50.0;
+        assert!(!s.is_identity(), "parametric_curve change should break identity");
+        let mut s2 = EditState::default();
+        s2.parametric_curve.highlights = -30.0;
+        assert!(!s2.is_identity(), "parametric_curve highlights change should break identity");
     }
 
     #[test]

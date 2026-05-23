@@ -114,7 +114,23 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
     // ── Tone Curve (Phase 2D) ─────────────────────────────────────────────────
     egui::CollapsingHeader::new("Tone Curve")
         .default_open(false)
-        .show(ui, |ui| { ui.label("(Phase 2D)"); });
+        .show(ui, |ui| {
+            egui::CollapsingHeader::new("Parametric")
+                .id_salt("tc_parametric")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.label("Highlights");
+                    if ui.add(egui::Slider::new(&mut edit.parametric_curve.highlights, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    ui.label("Lights");
+                    if ui.add(egui::Slider::new(&mut edit.parametric_curve.lights, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    ui.label("Darks");
+                    if ui.add(egui::Slider::new(&mut edit.parametric_curve.darks, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    ui.label("Shadows");
+                    if ui.add(egui::Slider::new(&mut edit.parametric_curve.shadows, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                });
+            ui.add_space(4.0);
+            ui.label("Point curve editor — coming in a later polish phase");
+        });
 
     // ── HSL (Phase 2B) ────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("HSL")
