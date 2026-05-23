@@ -6,15 +6,16 @@ use chalkraw_io::{decode_image, decode_image_bytes, LinearImage};
 use chalkraw_render::RenderDevice;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// Embedded sample image used when no fixture path is supplied or the
-/// supplied path doesn't exist. Lets a downloaded standalone binary open
-/// without crashing the moment a user double-clicks it.
+/// supplied path doesn't exist.
 const EMBEDDED_FIXTURE: &[u8] = include_bytes!("../../../tests/fixtures/sample.jpg");
+
+// ── AppState ─────────────────────────────────────────────────────────────────
 
 pub struct AppState {
     pub edit: EditState,
@@ -51,7 +52,6 @@ impl AppState {
             Err(e) => return Err(e.into()),
         };
 
-        // First-run: create a Photo row for the fixture if the catalog is empty.
         let existing = catalog.list_photos()?;
         let (photo, edit) = if let Some(p) = existing.into_iter().next() {
             let e = catalog.get_edit(p.id)?;
@@ -76,12 +76,7 @@ impl AppState {
         })
     }
 
-    /// Switch the current photo to one loaded from `path`. Flushes any pending
-    /// autosave on the previous photo first, then loads, hashes, and either looks
-    /// up an existing catalog row or inserts a new one.
     pub fn switch_to_path(&mut self, path: PathBuf) -> anyhow::Result<()> {
-        // Make sure pending edits on the previous photo are committed BEFORE we
-        // swap photo_id; otherwise they'd auto-save under the wrong id.
         self.dirty_since = Some(Instant::now() - DEBOUNCE);
         self.flush_if_due();
 
@@ -110,9 +105,6 @@ impl AppState {
         Ok(())
     }
 
-    /// Import a batch of files into the catalog. Decodes each, hashes for
-    /// dedup, generates a thumbnail, inserts the photo row. Does NOT switch
-    /// the currently displayed photo. Returns the count of newly inserted rows.
     pub fn import_files(&self, paths: &[PathBuf]) -> anyhow::Result<usize> {
         let mut inserted = 0;
         for path in paths {
@@ -187,20 +179,147 @@ impl AppState {
     pub fn delete_preset(&self, id: chalkraw_core::PresetId) -> anyhow::Result<()> {
         self.catalog.delete_preset(id).map_err(Into::into)
     }
+
+    /// Gather batch items from the catalog. If `only_picks` is true, filters to
+    /// photos flagged as Pick. Skips photos whose original_path doesn't exist.
+    pub fn collect_batch_items(
+        &self,
+        only_picks: bool,
+    ) -> anyhow::Result<Vec<chalkraw_export::BatchItem>> {
+        let photos = self.catalog.list_photos()?;
+        let mut items = Vec::new();
+        for p in photos {
+            if only_picks && p.flag != Flag::Pick {
+                continue;
+            }
+            if !p.original_path.exists() {
+                continue;
+            }
+            let edit = self.catalog.get_edit(p.id)?;
+            let original_name = p
+                .original_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "photo".to_string());
+            items.push(chalkraw_export::BatchItem {
+                source_path: p.original_path,
+                edit,
+                original_name,
+            });
+        }
+        Ok(items)
+    }
+}
+
+// ── Export dialog state ───────────────────────────────────────────────────────
+
+/// 9-point anchor grid index (row-major: 0=TopLeft … 8=BottomRight).
+fn anchor_index_to_enum(i: usize) -> chalkraw_export::WatermarkAnchor {
+    use chalkraw_export::WatermarkAnchor;
+    match i {
+        0 => WatermarkAnchor::TopLeft,
+        1 => WatermarkAnchor::TopCenter,
+        2 => WatermarkAnchor::TopRight,
+        3 => WatermarkAnchor::CenterLeft,
+        4 => WatermarkAnchor::Center,
+        5 => WatermarkAnchor::CenterRight,
+        6 => WatermarkAnchor::BottomLeft,
+        7 => WatermarkAnchor::BottomCenter,
+        _ => WatermarkAnchor::BottomRight,
+    }
+}
+
+struct WatermarkDialogState {
+    enabled: bool,
+    png_path: Option<PathBuf>,
+    /// 0..8, row-major
+    anchor_idx: usize,
+    /// 1..50
+    size_pct: f32,
+    /// 0..100 (stored as 0..100, converted to 0..1 on use)
+    opacity_pct: f32,
+    /// 0..20
+    margin_pct: f32,
+}
+
+impl Default for WatermarkDialogState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            png_path: None,
+            anchor_idx: 8, // BottomRight
+            size_pct: 15.0,
+            opacity_pct: 80.0,
+            margin_pct: 3.0,
+        }
+    }
+}
+
+impl WatermarkDialogState {
+    fn to_stamp(&self) -> Option<chalkraw_export::WatermarkStamp> {
+        if !self.enabled {
+            return None;
+        }
+        let png_path = self.png_path.clone()?;
+        Some(chalkraw_export::WatermarkStamp {
+            png_path,
+            anchor: anchor_index_to_enum(self.anchor_idx),
+            size_pct: self.size_pct,
+            opacity: self.opacity_pct / 100.0,
+            margin_pct: self.margin_pct,
+        })
+    }
+}
+
+// ── Batch progress (shared with export thread) ────────────────────────────────
+
+struct BatchProgress {
+    current: usize,
+    total: usize,
+    name: String,
+    done: bool,
+    results: Vec<chalkraw_export::BatchItemResult>,
+    error: Option<String>,
 }
 
 struct ExportDialogState {
-    format_index: usize,    // 0=JPEG, 1=PNG, 2=TIFF
-    quality: u8,            // 1..100, JPEG only
-    resize_long_edge: bool, // toggle
-    long_edge: u32,         // 1..32768
+    // Format
+    format_index: usize, // 0=JPEG, 1=PNG, 2=TIFF
+    quality: u8,
+    // Resize
+    resize_long_edge: bool,
+    long_edge: u32,
+    // Batch source
+    only_picks: bool,
+    // Output
+    output_dir: Option<PathBuf>,
+    name_pattern: String,
+    // Watermark
+    watermark: WatermarkDialogState,
+    // Runtime state
+    batch_progress: Option<Arc<Mutex<BatchProgress>>>,
+    /// Set when the batch completed — holds counts for display.
+    completion_message: Option<String>,
 }
 
 impl Default for ExportDialogState {
     fn default() -> Self {
-        Self { format_index: 0, quality: 92, resize_long_edge: false, long_edge: 2048 }
+        Self {
+            format_index: 0,
+            quality: 92,
+            resize_long_edge: false,
+            long_edge: 2048,
+            only_picks: false,
+            output_dir: None,
+            name_pattern: "{name}_edited".to_string(),
+            watermark: WatermarkDialogState::default(),
+            batch_progress: None,
+            completion_message: None,
+        }
     }
 }
+
+// ── App ───────────────────────────────────────────────────────────────────────
 
 pub struct ChalkrawApp {
     state: AppState,
@@ -227,24 +346,14 @@ impl ChalkrawApp {
 
     fn ensure_gpu(&mut self, frame: &eframe::Frame) {
         if self.gpu.is_some() { return; }
-
-        // egui-wgpu 0.33.3: `frame.wgpu_render_state()` returns
-        // `Option<&egui_wgpu::RenderState>`, NOT `Option<Arc<...>>`.
         let render_state = match frame.wgpu_render_state() {
             Some(rs) => rs,
             None => return,
         };
-
-        // egui-wgpu 0.33.3 / wgpu 27: `RenderState.device` and `.queue` are plain
-        // `wgpu::Device` / `wgpu::Queue` (both derive `Clone`; the clone is a
-        // cheap internal Arc clone), not wrapped in `Arc<...>` themselves.
-        // `RenderDevice::from_shared` wants `Arc<Device>` + `Arc<Queue>`,
-        // so we clone the handle and wrap it.
         let rd = RenderDevice::from_shared(
             Arc::new(render_state.device.clone()),
             Arc::new(render_state.queue.clone()),
         );
-
         let format = render_state.target_format;
         let gpu = CanvasGpu::new(&rd, &self.state.image, format);
         gpu.update(&self.state.edit);
@@ -255,7 +364,6 @@ impl ChalkrawApp {
         self.thumb_textures
             .entry(photo.id)
             .or_insert_with(|| {
-                // Decode the JPEG bytes stored on Photo.thumbnail.
                 let img = image::load_from_memory(&photo.thumbnail)
                     .map(|d| d.to_rgba8())
                     .ok();
@@ -283,9 +391,6 @@ impl eframe::App for ChalkrawApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.ensure_gpu(frame);
 
-        // Flag keyboard shortcuts: P=Pick, U=None, X=Reject (Lightroom convention).
-        // Collect key presses inside the closure then dispatch outside to avoid
-        // a borrow-checker conflict between ctx.input and self.state.
         let mut to_set: Option<Flag> = None;
         ctx.input(|i| {
             if i.key_pressed(egui::Key::P) {
@@ -330,7 +435,7 @@ impl eframe::App for ChalkrawApp {
                             self.thumb_textures.clear();
                         }
                     }
-                    if ui.button("Export…").clicked() {
+                    if ui.button("Batch Export…").clicked() {
                         ui.close();
                         self.export_dialog = Some(ExportDialogState::default());
                     }
@@ -340,7 +445,12 @@ impl eframe::App for ChalkrawApp {
                 });
                 ui.menu_button("Library", |ui| { ui.label("(Phase 3)"); });
                 ui.menu_button("Develop", |ui| { ui.label("(Phase 2)"); });
-                ui.menu_button("Export", |ui| { ui.label("(Phase 7)"); });
+                ui.menu_button("Export", |ui| {
+                    if ui.button("Batch Export…").clicked() {
+                        ui.close();
+                        self.export_dialog = Some(ExportDialogState::default());
+                    }
+                });
                 let path = self.state.catalog.path().display().to_string();
                 ui.label(format!("  catalog: {path}  |  P=Pick  U=None  X=Reject"));
             });
@@ -371,8 +481,6 @@ impl eframe::App for ChalkrawApp {
             }
             let current_id = self.state.photo_id;
             let mut clicked: Option<PathBuf> = None;
-            // Collect thumbnails first so the mutable borrow of self (for
-            // ensure_thumb) is released before entering the ScrollArea closure.
             let thumbs: Vec<(PhotoId, PathBuf, egui::TextureHandle, Flag)> = photos.iter()
                 .map(|p| {
                     let tex = self.ensure_thumb(ctx, p);
@@ -385,7 +493,6 @@ impl eframe::App for ChalkrawApp {
                         let is_current = *pid == current_id;
                         let img = egui::Image::new(tex).max_height(100.0).max_width(140.0);
                         let response = ui.add(img.sense(egui::Sense::click()));
-                        // Draw flag-colour outline first, then current-selection gold on top.
                         let flag_color = match flag {
                             Flag::Pick   => Some(egui::Color32::from_rgb(80, 200, 80)),
                             Flag::Reject => Some(egui::Color32::from_rgb(220, 80, 80)),
@@ -429,11 +536,6 @@ impl eframe::App for ChalkrawApp {
                     self.state.mark_dirty();
                 }
                 let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
-
-                // egui-wgpu 0.33.3: `Callback::new_paint_callback` returns
-                // `epaint::PaintCallback`, which does NOT implement `Into<Shape>`
-                // directly. Wrap it in `egui::Shape::Callback(...)` to satisfy
-                // `painter.add(impl Into<Shape>)`.
                 ui.painter().add(egui::Shape::Callback(
                     egui_wgpu::Callback::new_paint_callback(
                         rect,
@@ -445,105 +547,280 @@ impl eframe::App for ChalkrawApp {
             }
         });
 
-        // Export dialog — rendered after all panels so it floats on top.
+        // ── Export dialog ─────────────────────────────────────────────────────
         if let Some(dlg) = self.export_dialog.as_mut() {
             let mut open = true;
-            let mut should_export = false;
             let mut should_close = false;
-            egui::Window::new("Export")
+            let mut should_start_export = false;
+
+            egui::Window::new("Batch Export")
                 .open(&mut open)
                 .collapsible(false)
-                .resizable(false)
+                .resizable(true)
+                .default_width(420.0)
                 .show(ctx, |ui| {
-                    ui.label("Format");
+                    // ── Check if batch running ────────────────────────────────
+                    if let Some(ref progress_arc) = dlg.batch_progress {
+                        let prog = progress_arc.lock().unwrap();
+                        if prog.done {
+                            // Finished — show results
+                            if let Some(ref msg) = dlg.completion_message {
+                                ui.label(msg);
+                            } else {
+                                let ok = prog.results.iter().filter(|r| r.error.is_none()).count();
+                                let err = prog.results.iter().filter(|r| r.error.is_some()).count();
+                                let msg = format!(
+                                    "Done: {ok} exported, {err} failed.",
+                                );
+                                drop(prog);
+                                dlg.completion_message = Some(msg.clone());
+                                ui.label(msg);
+                            }
+                            if ui.button("Close").clicked() {
+                                should_close = true;
+                            }
+                        } else {
+                            // In progress
+                            ui.label(format!(
+                                "Exporting {}/{} — {}",
+                                prog.current, prog.total, prog.name
+                            ));
+                            ui.add(egui::ProgressBar::new(
+                                if prog.total > 0 {
+                                    prog.current.saturating_sub(1) as f32 / prog.total as f32
+                                } else {
+                                    0.0
+                                },
+                            ));
+                            if let Some(ref e) = prog.error {
+                                ui.colored_label(egui::Color32::RED, e);
+                            }
+                            drop(prog);
+                            if ui.button("Cancel (closes dialog; export continues in background)").clicked() {
+                                should_close = true;
+                            }
+                            ctx.request_repaint_after(Duration::from_millis(200));
+                        }
+                        return;
+                    }
+
+                    // ── Normal controls ───────────────────────────────────────
+                    egui::CollapsingHeader::new("Format & Size")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.radio_value(&mut dlg.format_index, 0, "JPEG");
+                                ui.radio_value(&mut dlg.format_index, 1, "PNG");
+                                ui.radio_value(&mut dlg.format_index, 2, "TIFF");
+                            });
+                            if dlg.format_index == 0 {
+                                ui.horizontal(|ui| {
+                                    ui.label("Quality");
+                                    ui.add(egui::Slider::new(&mut dlg.quality, 1..=100));
+                                });
+                            }
+                            ui.checkbox(&mut dlg.resize_long_edge, "Resize long edge (px)");
+                            if dlg.resize_long_edge {
+                                ui.add(egui::Slider::new(&mut dlg.long_edge, 256..=8192));
+                            }
+                        });
+
+                    ui.separator();
+
+                    // Source toggle
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut dlg.format_index, 0, "JPEG");
-                        ui.radio_value(&mut dlg.format_index, 1, "PNG");
-                        ui.radio_value(&mut dlg.format_index, 2, "TIFF");
+                        ui.label("Source:");
+                        ui.radio_value(&mut dlg.only_picks, false, "All photos");
+                        ui.radio_value(&mut dlg.only_picks, true, "Only Picks");
                     });
-                    if dlg.format_index == 0 {
-                        ui.label("Quality");
-                        ui.add(egui::Slider::new(&mut dlg.quality, 1..=100));
-                    }
+
                     ui.separator();
-                    ui.checkbox(&mut dlg.resize_long_edge, "Resize long edge (px)");
-                    if dlg.resize_long_edge {
-                        ui.add(egui::Slider::new(&mut dlg.long_edge, 256..=8192));
+
+                    // Output folder
+                    ui.horizontal(|ui| {
+                        ui.label("Output folder:");
+                        if ui.button("Choose…").clicked() {
+                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                dlg.output_dir = Some(folder);
+                            }
+                        }
+                    });
+                    match &dlg.output_dir {
+                        Some(p) => { ui.label(p.display().to_string()); }
+                        None    => { ui.colored_label(egui::Color32::YELLOW, "(no folder selected)"); }
                     }
+
+                    // File name pattern
+                    ui.horizontal(|ui| {
+                        ui.label("File name pattern:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut dlg.name_pattern)
+                                .desired_width(180.0)
+                                .hint_text("{name}_edited"),
+                        );
+                    });
+                    ui.label(
+                        egui::RichText::new("Tokens: {name}  {date}  {ext}")
+                            .small()
+                            .color(egui::Color32::GRAY),
+                    );
+
                     ui.separator();
+
+                    // Watermark section
+                    egui::CollapsingHeader::new("Watermark")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.checkbox(&mut dlg.watermark.enabled, "Enable PNG watermark stamp");
+                            if dlg.watermark.enabled {
+                                ui.horizontal(|ui| {
+                                    ui.label("PNG file:");
+                                    if ui.button("Browse…").clicked() {
+                                        if let Some(p) = rfd::FileDialog::new()
+                                            .add_filter("PNG", &["png"])
+                                            .pick_file()
+                                        {
+                                            dlg.watermark.png_path = Some(p);
+                                        }
+                                    }
+                                });
+                                match &dlg.watermark.png_path {
+                                    Some(p) => { ui.label(p.display().to_string()); }
+                                    None    => { ui.colored_label(egui::Color32::YELLOW, "(no PNG selected)"); }
+                                }
+
+                                ui.add_space(4.0);
+                                ui.label("Anchor (click to choose):");
+                                // 3×3 anchor grid
+                                let labels = [
+                                    "↖ TL", "↑ TC", "↗ TR",
+                                    "← CL", "·  C", "→ CR",
+                                    "↙ BL", "↓ BC", "↘ BR",
+                                ];
+                                egui::Grid::new("anchor_grid").num_columns(3).show(ui, |ui| {
+                                    for (i, label) in labels.iter().enumerate() {
+                                        let selected = dlg.watermark.anchor_idx == i;
+                                        if ui.add(egui::Button::new(*label).selected(selected)).clicked() {
+                                            dlg.watermark.anchor_idx = i;
+                                        }
+                                        if i % 3 == 2 { ui.end_row(); }
+                                    }
+                                });
+
+                                ui.horizontal(|ui| {
+                                    ui.label("Size (% long edge):");
+                                    ui.add(egui::Slider::new(&mut dlg.watermark.size_pct, 1.0..=50.0).fixed_decimals(0));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Opacity (%):");
+                                    ui.add(egui::Slider::new(&mut dlg.watermark.opacity_pct, 0.0..=100.0).fixed_decimals(0));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Margin (% long edge):");
+                                    ui.add(egui::Slider::new(&mut dlg.watermark.margin_pct, 0.0..=20.0).fixed_decimals(0));
+                                });
+                            }
+                        });
+
+                    ui.separator();
+
                     ui.horizontal(|ui| {
                         if ui.button("Cancel").clicked() {
                             should_close = true;
                         }
-                        if ui.button("Export").clicked() {
-                            should_export = true;
+                        let can_export = dlg.output_dir.is_some();
+                        ui.add_enabled_ui(can_export, |ui| {
+                            if ui.button("Export").clicked() {
+                                should_start_export = true;
+                            }
+                        });
+                        if !can_export {
+                            ui.label(egui::RichText::new("← choose output folder first").color(egui::Color32::GRAY).small());
                         }
                     });
                 });
+
             if !open || should_close {
                 self.export_dialog = None;
-            } else if should_export {
-                let opts = chalkraw_export::ExportOptions {
-                    format: match dlg.format_index {
+            } else if should_start_export {
+                // Build batch options from dialog state.
+                if let Some(ref dlg_inner) = self.export_dialog {
+                    let output_dir = dlg_inner.output_dir.clone().unwrap();
+                    let format = match dlg_inner.format_index {
                         1 => chalkraw_export::ExportFormat::Png,
                         2 => chalkraw_export::ExportFormat::Tiff,
-                        _ => chalkraw_export::ExportFormat::Jpeg { quality: dlg.quality },
-                    },
-                    resize: if dlg.resize_long_edge {
-                        chalkraw_export::ExportResize::LongEdge(dlg.long_edge)
+                        _ => chalkraw_export::ExportFormat::Jpeg { quality: dlg_inner.quality },
+                    };
+                    let resize = if dlg_inner.resize_long_edge {
+                        chalkraw_export::ExportResize::LongEdge(dlg_inner.long_edge)
                     } else {
                         chalkraw_export::ExportResize::Original
-                    },
-                };
-                // Capture the data we need before moving into the export branch,
-                // to avoid borrow conflicts with self inside the if-let.
-                let image_clone = self.state.image.clone();
-                let edit_clone = self.state.edit.clone();
-                let photo_id = self.state.photo_id;
-                // Suggested default filename derived from the current photo's original path.
-                let default_name = self.state
-                    .catalog
-                    .get_photo(photo_id)
-                    .ok()
-                    .and_then(|p| p.original_path.file_stem().map(|s| s.to_string_lossy().into_owned()))
-                    .unwrap_or_else(|| "export".to_string());
-                let ext = match opts.format {
-                    chalkraw_export::ExportFormat::Jpeg { .. } => "jpg",
-                    chalkraw_export::ExportFormat::Png => "png",
-                    chalkraw_export::ExportFormat::Tiff => "tiff",
-                };
-                let dst = rfd::FileDialog::new()
-                    .set_file_name(format!("{default_name}_edited.{ext}"))
-                    .add_filter(ext, &[ext])
-                    .save_file();
-                if let Some(path) = dst {
-                    // Build a fresh RenderDevice for offscreen export. We can't easily
-                    // reuse the egui-wgpu device here because we need its Arc<Device>;
-                    // a separate headless device is simpler and only costs a one-shot
-                    // adapter request.
-                    match chalkraw_render::RenderDevice::new_headless() {
-                        Ok(rd) => {
-                            if let Err(e) = chalkraw_export::export_current(
-                                &rd,
-                                &image_clone,
-                                &edit_clone,
-                                &path,
-                                opts,
-                            ) {
-                                log::warn!("export failed: {e}");
-                            } else {
-                                log::info!("exported {path:?}");
+                    };
+                    let opts = chalkraw_export::BatchOptions {
+                        format,
+                        resize,
+                        output_dir,
+                        name_pattern: dlg_inner.name_pattern.clone(),
+                        watermark: dlg_inner.watermark.to_stamp(),
+                    };
+                    let only_picks = dlg_inner.only_picks;
+
+                    match self.state.collect_batch_items(only_picks) {
+                        Ok(items) => {
+                            let total = items.len();
+                            let progress = Arc::new(Mutex::new(BatchProgress {
+                                current: 0,
+                                total,
+                                name: String::new(),
+                                done: false,
+                                results: Vec::new(),
+                                error: None,
+                            }));
+                            let progress_thread = progress.clone();
+                            std::thread::spawn(move || {
+                                let rd = match RenderDevice::new_headless() {
+                                    Ok(rd) => rd,
+                                    Err(e) => {
+                                        let mut p = progress_thread.lock().unwrap();
+                                        p.done = true;
+                                        p.error = Some(format!("export device unavailable: {e}"));
+                                        return;
+                                    }
+                                };
+                                let results = chalkraw_export::export_batch(
+                                    &rd,
+                                    &items,
+                                    &opts,
+                                    |i, n, name| {
+                                        let mut p = progress_thread.lock().unwrap();
+                                        p.current = i;
+                                        p.total = n;
+                                        p.name = name.to_string();
+                                    },
+                                );
+                                let mut p = progress_thread.lock().unwrap();
+                                p.done = true;
+                                p.results = results;
+                            });
+                            if let Some(ref mut dlg_mut) = self.export_dialog {
+                                dlg_mut.batch_progress = Some(progress);
+                                // Force label to show 0/N immediately
+                                if let Some(ref prog_arc) = dlg_mut.batch_progress {
+                                    let mut prog = prog_arc.lock().unwrap();
+                                    prog.total = total;
+                                }
                             }
+                            ctx.request_repaint_after(Duration::from_millis(200));
                         }
-                        Err(e) => log::warn!("export render device unavailable: {e}"),
+                        Err(e) => {
+                            log::warn!("collect batch items failed: {e}");
+                        }
                     }
                 }
-                self.export_dialog = None;
             }
         }
 
-        // Debounced autosave; request a repaint slightly past the debounce so we
-        // get woken even when the user has stopped interacting.
+        // Debounced autosave.
         self.state.flush_if_due();
         if self.state.dirty_since.is_some() {
             ctx.request_repaint_after(DEBOUNCE + Duration::from_millis(20));

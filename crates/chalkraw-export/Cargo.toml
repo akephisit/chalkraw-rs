@@ -12,6 +12,8 @@ chalkraw-io = { workspace = true }
 image = { workspace = true }
 wgpu = { workspace = true }
 thiserror = { workspace = true }
+chrono = { workspace = true }
+log = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
