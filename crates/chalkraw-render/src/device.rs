@@ -17,15 +17,14 @@ impl RenderDevice {
     }
 
     pub async fn new_headless_async() -> Result<Self, RenderError> {
-        // wgpu 29: Instance::new takes InstanceDescriptor by value (not reference),
-        // and InstanceDescriptor does not implement Default (due to display field).
-        // Use new_without_display_handle() and override backends.
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        // wgpu 27: Instance::new takes &InstanceDescriptor (by reference).
+        // InstanceDescriptor implements Default.
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
+            ..Default::default()
         });
-        // wgpu 29.x: request_adapter returns Result<Adapter, RequestAdapterError>,
-        // not Option<Adapter>. Map any error to RenderError::NoAdapter.
+        // wgpu 27: request_adapter returns Result<Adapter, RequestAdapterError>.
+        // Map any error to RenderError::NoAdapter.
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
