@@ -165,10 +165,24 @@ impl AppState {
     }
 }
 
+struct ExportDialogState {
+    format_index: usize,    // 0=JPEG, 1=PNG, 2=TIFF
+    quality: u8,            // 1..100, JPEG only
+    resize_long_edge: bool, // toggle
+    long_edge: u32,         // 1..32768
+}
+
+impl Default for ExportDialogState {
+    fn default() -> Self {
+        Self { format_index: 0, quality: 92, resize_long_edge: false, long_edge: 2048 }
+    }
+}
+
 pub struct ChalkrawApp {
     state: AppState,
     gpu: Option<Arc<CanvasGpu>>,
     thumb_textures: HashMap<PhotoId, egui::TextureHandle>,
+    export_dialog: Option<ExportDialogState>,
 }
 
 impl ChalkrawApp {
@@ -184,7 +198,7 @@ impl ChalkrawApp {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("default.chalkraw"));
         let state = AppState::bootstrap(fixture, catalog_path)?;
-        Ok(Self { state, gpu: None, thumb_textures: HashMap::new() })
+        Ok(Self { state, gpu: None, thumb_textures: HashMap::new(), export_dialog: None })
     }
 
     fn ensure_gpu(&mut self, frame: &eframe::Frame) {
@@ -291,6 +305,10 @@ impl eframe::App for ChalkrawApp {
                             }
                             self.thumb_textures.clear();
                         }
+                    }
+                    if ui.button("Export…").clicked() {
+                        ui.close();
+                        self.export_dialog = Some(ExportDialogState::default());
                     }
                     if ui.button("Quit").clicked() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -402,6 +420,103 @@ impl eframe::App for ChalkrawApp {
                 ui.label("Initialising GPU…");
             }
         });
+
+        // Export dialog — rendered after all panels so it floats on top.
+        if let Some(dlg) = self.export_dialog.as_mut() {
+            let mut open = true;
+            let mut should_export = false;
+            let mut should_close = false;
+            egui::Window::new("Export")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Format");
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut dlg.format_index, 0, "JPEG");
+                        ui.radio_value(&mut dlg.format_index, 1, "PNG");
+                        ui.radio_value(&mut dlg.format_index, 2, "TIFF");
+                    });
+                    if dlg.format_index == 0 {
+                        ui.label("Quality");
+                        ui.add(egui::Slider::new(&mut dlg.quality, 1..=100));
+                    }
+                    ui.separator();
+                    ui.checkbox(&mut dlg.resize_long_edge, "Resize long edge (px)");
+                    if dlg.resize_long_edge {
+                        ui.add(egui::Slider::new(&mut dlg.long_edge, 256..=8192));
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            should_close = true;
+                        }
+                        if ui.button("Export").clicked() {
+                            should_export = true;
+                        }
+                    });
+                });
+            if !open || should_close {
+                self.export_dialog = None;
+            } else if should_export {
+                let opts = chalkraw_export::ExportOptions {
+                    format: match dlg.format_index {
+                        1 => chalkraw_export::ExportFormat::Png,
+                        2 => chalkraw_export::ExportFormat::Tiff,
+                        _ => chalkraw_export::ExportFormat::Jpeg { quality: dlg.quality },
+                    },
+                    resize: if dlg.resize_long_edge {
+                        chalkraw_export::ExportResize::LongEdge(dlg.long_edge)
+                    } else {
+                        chalkraw_export::ExportResize::Original
+                    },
+                };
+                // Capture the data we need before moving into the export branch,
+                // to avoid borrow conflicts with self inside the if-let.
+                let image_clone = self.state.image.clone();
+                let edit_clone = self.state.edit.clone();
+                let photo_id = self.state.photo_id;
+                // Suggested default filename derived from the current photo's original path.
+                let default_name = self.state
+                    .catalog
+                    .get_photo(photo_id)
+                    .ok()
+                    .and_then(|p| p.original_path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| "export".to_string());
+                let ext = match opts.format {
+                    chalkraw_export::ExportFormat::Jpeg { .. } => "jpg",
+                    chalkraw_export::ExportFormat::Png => "png",
+                    chalkraw_export::ExportFormat::Tiff => "tiff",
+                };
+                let dst = rfd::FileDialog::new()
+                    .set_file_name(format!("{default_name}_edited.{ext}"))
+                    .add_filter(ext, &[ext])
+                    .save_file();
+                if let Some(path) = dst {
+                    // Build a fresh RenderDevice for offscreen export. We can't easily
+                    // reuse the egui-wgpu device here because we need its Arc<Device>;
+                    // a separate headless device is simpler and only costs a one-shot
+                    // adapter request.
+                    match chalkraw_render::RenderDevice::new_headless() {
+                        Ok(rd) => {
+                            if let Err(e) = chalkraw_export::export_current(
+                                &rd,
+                                &image_clone,
+                                &edit_clone,
+                                &path,
+                                opts,
+                            ) {
+                                log::warn!("export failed: {e}");
+                            } else {
+                                log::info!("exported {path:?}");
+                            }
+                        }
+                        Err(e) => log::warn!("export render device unavailable: {e}"),
+                    }
+                }
+                self.export_dialog = None;
+            }
+        }
 
         // Debounced autosave; request a repaint slightly past the debounce so we
         // get woken even when the user has stopped interacting.

@@ -9,5 +9,13 @@ license.workspace = true
 chalkraw-core = { workspace = true }
 chalkraw-render = { workspace = true }
 chalkraw-io = { workspace = true }
-chalkraw-catalog = { workspace = true }
+image = { workspace = true }
+wgpu = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+image = { workspace = true }
+chalkraw-io = { workspace = true }
+chalkraw-core = { workspace = true }
+chalkraw-render = { workspace = true }
