@@ -41,6 +41,9 @@ impl Catalog {
                 let _ = write.open_table(PHOTOS_TABLE)?;
                 let _ = write.open_table(EDITS_TABLE)?;
                 let mut meta = write.open_table(META_TABLE)?;
+                // FIXME(phase 2): existed-but-missing-meta currently silently
+                // recreates meta, masking corruption. Consider returning
+                // CatalogError::MissingMeta(path) instead.
                 if !existed || meta.get(META_KEY)?.is_none() {
                     let m = CatalogMeta {
                         name: name.to_string(),
@@ -79,6 +82,8 @@ impl Catalog {
         Ok(bincode::deserialize(stored.value())?)
     }
 
+    /// Sibling-module access to the underlying redb database.
+    #[allow(dead_code)] // used by photos/edits modules in Task 7
     pub(crate) fn db(&self) -> &Database { &self.db }
 }
 
@@ -109,5 +114,41 @@ mod tests {
         let meta = cat.meta().unwrap();
         assert_eq!(meta.name, "first");
         assert_eq!(meta.created_at, first_created);
+    }
+
+    #[test]
+    fn mismatched_schema_version_returns_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bad.chalkraw");
+
+        // Write a catalog with the wrong schema version directly.
+        {
+            let db = Database::create(&path).unwrap();
+            let write = db.begin_write().unwrap();
+            {
+                let _ = write.open_table(PHOTOS_TABLE).unwrap();
+                let _ = write.open_table(EDITS_TABLE).unwrap();
+                let mut meta = write.open_table(META_TABLE).unwrap();
+                let m = CatalogMeta {
+                    name: "wrong".into(),
+                    created_at: chrono::Utc::now(),
+                    app_version: "0.0.0".into(),
+                    schema_version: 99,
+                };
+                let bytes = bincode::serialize(&m).unwrap();
+                meta.insert("meta", bytes.as_slice()).unwrap();
+            }
+            write.commit().unwrap();
+        }
+        // db drops here, releasing file lock.
+
+        let err = Catalog::open_or_create(&path, "ignored").err().expect("expected SchemaVersion error");
+        match err {
+            CatalogError::SchemaVersion { found, expected } => {
+                assert_eq!(found, 99);
+                assert_eq!(expected, SCHEMA_VERSION);
+            }
+            other => panic!("expected SchemaVersion error, got {:?}", other),
+        }
     }
 }
