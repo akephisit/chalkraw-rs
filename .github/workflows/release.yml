@@ -25,10 +25,6 @@ jobs:
             os: windows-latest
             binary: chalkraw.exe
             asset: chalkraw-windows-x86_64.exe
-          - target: x86_64-apple-darwin
-            os: macos-13
-            binary: chalkraw
-            asset: chalkraw-macos-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
             binary: chalkraw
