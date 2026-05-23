@@ -4,6 +4,7 @@ use chalkraw_catalog::Catalog;
 use chalkraw_core::{EditState, ImageFormat, Photo, PhotoId};
 use chalkraw_io::{decode_image, decode_image_bytes, LinearImage};
 use chalkraw_render::RenderDevice;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -55,7 +56,9 @@ impl AppState {
             (p, e)
         } else {
             let hash = *blake3::hash(&file_bytes).as_bytes();
-            let p = Photo::new(photo_path, hash, image.width, image.height, ImageFormat::Jpeg);
+            let thumb = chalkraw_io::make_thumbnail(&image).unwrap_or_default();
+            let mut p = Photo::new(photo_path, hash, image.width, image.height, ImageFormat::Jpeg);
+            p.thumbnail = thumb;
             catalog.insert_photo(&p)?;
             (p, EditState::default())
         };
@@ -102,6 +105,40 @@ impl AppState {
         Ok(())
     }
 
+    /// Import a batch of files into the catalog. Decodes each, hashes for
+    /// dedup, generates a thumbnail, inserts the photo row. Does NOT switch
+    /// the currently displayed photo. Returns the count of newly inserted rows.
+    pub fn import_files(&self, paths: &[PathBuf]) -> anyhow::Result<usize> {
+        let mut inserted = 0;
+        for path in paths {
+            let bytes = match std::fs::read(path) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::warn!("skip {path:?}: {e}");
+                    continue;
+                }
+            };
+            let img = match decode_image(path) {
+                Ok(i) => i,
+                Err(e) => {
+                    log::warn!("skip {path:?}: {e}");
+                    continue;
+                }
+            };
+            let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
+            if self.catalog.find_photo_by_hash(&hash)?.is_some() {
+                log::info!("skip {path:?}: already imported");
+                continue;
+            }
+            let thumb = chalkraw_io::make_thumbnail(&img).unwrap_or_default();
+            let mut p = Photo::new(path.clone(), hash, img.width, img.height, ImageFormat::Jpeg);
+            p.thumbnail = thumb;
+            self.catalog.insert_photo(&p)?;
+            inserted += 1;
+        }
+        Ok(inserted)
+    }
+
     pub fn mark_dirty(&mut self) { self.dirty_since = Some(Instant::now()); }
 
     pub fn flush_if_due(&mut self) {
@@ -120,6 +157,7 @@ impl AppState {
 pub struct ChalkrawApp {
     state: AppState,
     gpu: Option<Arc<CanvasGpu>>,
+    thumb_textures: HashMap<PhotoId, egui::TextureHandle>,
 }
 
 impl ChalkrawApp {
@@ -135,7 +173,7 @@ impl ChalkrawApp {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("default.chalkraw"));
         let state = AppState::bootstrap(fixture, catalog_path)?;
-        Ok(Self { state, gpu: None })
+        Ok(Self { state, gpu: None, thumb_textures: HashMap::new() })
     }
 
     fn ensure_gpu(&mut self, frame: &eframe::Frame) {
@@ -163,6 +201,33 @@ impl ChalkrawApp {
         gpu.update(&self.state.edit);
         self.gpu = Some(Arc::new(gpu));
     }
+
+    fn ensure_thumb(&mut self, ctx: &egui::Context, photo: &Photo) -> egui::TextureHandle {
+        self.thumb_textures
+            .entry(photo.id)
+            .or_insert_with(|| {
+                // Decode the JPEG bytes stored on Photo.thumbnail.
+                let img = image::load_from_memory(&photo.thumbnail)
+                    .map(|d| d.to_rgba8())
+                    .ok();
+                let color_image = match img {
+                    Some(rgba) => {
+                        let (w, h) = rgba.dimensions();
+                        egui::ColorImage::from_rgba_unmultiplied(
+                            [w as usize, h as usize],
+                            rgba.as_raw(),
+                        )
+                    }
+                    None => egui::ColorImage::new([1, 1], vec![egui::Color32::DARK_GRAY]),
+                };
+                ctx.load_texture(
+                    format!("thumb-{}", photo.id),
+                    color_image,
+                    egui::TextureOptions::LINEAR,
+                )
+            })
+            .clone()
+    }
 }
 
 impl eframe::App for ChalkrawApp {
@@ -181,8 +246,22 @@ impl eframe::App for ChalkrawApp {
                             if let Err(e) = self.state.switch_to_path(path) {
                                 log::warn!("open photo failed: {e}");
                             } else {
-                                self.gpu = None; // force CanvasGpu rebuild on next ensure_gpu
+                                self.gpu = None;
+                                self.thumb_textures.clear();
                             }
+                        }
+                    }
+                    if ui.button("Import Photos…").clicked() {
+                        ui.close();
+                        if let Some(paths) = rfd::FileDialog::new()
+                            .add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff"])
+                            .pick_files()
+                        {
+                            match self.state.import_files(&paths) {
+                                Ok(n) => log::info!("imported {n} new photos"),
+                                Err(e) => log::warn!("import failed: {e}"),
+                            }
+                            self.thumb_textures.clear();
                         }
                     }
                     if ui.button("Quit").clicked() {
@@ -209,7 +288,54 @@ impl eframe::App for ChalkrawApp {
         });
 
         egui::TopBottomPanel::bottom("filmstrip").default_height(120.0).show(ctx, |ui| {
-            ui.label("Filmstrip (Phase 3)");
+            let photos = match self.state.catalog.list_photos() {
+                Ok(p) => p,
+                Err(e) => {
+                    ui.label(format!("filmstrip error: {e}"));
+                    return;
+                }
+            };
+            if photos.is_empty() {
+                ui.label("No photos yet. File → Import Photos…");
+                return;
+            }
+            let current_id = self.state.photo_id;
+            let mut clicked: Option<PathBuf> = None;
+            // Collect thumbnails first so the mutable borrow of self (for
+            // ensure_thumb) is released before entering the ScrollArea closure.
+            let thumbs: Vec<(PhotoId, PathBuf, egui::TextureHandle)> = photos.iter()
+                .map(|p| {
+                    let tex = self.ensure_thumb(ctx, p);
+                    (p.id, p.original_path.clone(), tex)
+                })
+                .collect();
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (pid, path, tex) in &thumbs {
+                        let is_current = *pid == current_id;
+                        let img = egui::Image::new(tex).max_height(100.0).max_width(140.0);
+                        let response = ui.add(img.sense(egui::Sense::click()));
+                        if is_current {
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                2.0,
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(220, 200, 60)),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                        if response.clicked() {
+                            clicked = Some(path.clone());
+                        }
+                    }
+                });
+            });
+            if let Some(path) = clicked {
+                if let Err(e) = self.state.switch_to_path(path) {
+                    log::warn!("switch_to_path failed: {e}");
+                } else {
+                    self.gpu = None;
+                }
+            }
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {

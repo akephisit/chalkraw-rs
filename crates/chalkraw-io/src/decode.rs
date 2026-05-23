@@ -84,6 +84,65 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Result<LinearImage, IoError> {
     Ok(LinearImage { width: w, height: h, format, pixels: to_linear(&rgba8) })
 }
 
+/// Encode a 256-px-long-edge JPEG thumbnail from a decoded source.
+/// Returns the JPEG byte stream for storage in `Photo.thumbnail`.
+pub fn make_thumbnail(linear: &LinearImage) -> Result<Vec<u8>, IoError> {
+    use image::{ImageBuffer, Rgba};
+    let max_dim = 256u32;
+    let (orig_w, orig_h) = (linear.width, linear.height);
+    let scale = (max_dim as f32) / (orig_w.max(orig_h) as f32);
+    let new_w = ((orig_w as f32) * scale).max(1.0) as u32;
+    let new_h = ((orig_h as f32) * scale).max(1.0) as u32;
+
+    // Convert linear f32 RGBA back to sRGB u8 for JPEG encoding.
+    let mut src_bytes = Vec::with_capacity((orig_w * orig_h * 4) as usize);
+    for &v in &linear.pixels {
+        let v = v.clamp(0.0, 1.0);
+        let srgb = if v <= 0.0031308 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        };
+        src_bytes.push((srgb * 255.0).round() as u8);
+    }
+    let buffer: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(orig_w, orig_h, src_bytes)
+        .ok_or_else(|| IoError::DecodeFailed {
+            path: std::path::PathBuf::from("<thumbnail-encode>"),
+            source: image::ImageError::Limits(image::error::LimitError::from_kind(
+                image::error::LimitErrorKind::DimensionError,
+            )),
+        })?;
+
+    let resized = image::imageops::resize(
+        &buffer,
+        new_w,
+        new_h,
+        image::imageops::FilterType::Triangle,
+    );
+
+    let mut out = Vec::new();
+    let rgb: ImageBuffer<image::Rgb<u8>, _> = ImageBuffer::from_fn(new_w, new_h, |x, y| {
+        let p = resized.get_pixel(x, y);
+        image::Rgb([p[0], p[1], p[2]])
+    });
+    {
+        use image::ImageEncoder;
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
+        encoder
+            .write_image(
+                rgb.as_raw(),
+                new_w,
+                new_h,
+                image::ExtendedColorType::Rgb8,
+            )
+            .map_err(|e| IoError::DecodeFailed {
+                path: std::path::PathBuf::from("<thumbnail-encode>"),
+                source: e,
+            })?;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +208,18 @@ mod tests {
         assert_eq!(img.height, 4);
         assert_eq!(img.format, ImageFormat::Png);
         assert_eq!(img.pixels.len(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn make_thumbnail_produces_jpeg_under_512_long_edge() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/sample.jpg");
+        let img = decode_image(path).unwrap();
+        let bytes = make_thumbnail(&img).unwrap();
+        assert!(bytes.len() > 100, "thumbnail too small ({} bytes)", bytes.len());
+        // Decode the thumbnail back and check dimensions.
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        let (w, h) = (decoded.width(), decoded.height());
+        assert!(w <= 256 && h <= 256);
+        assert!(w == 256 || h == 256); // one edge must hit the max
     }
 }

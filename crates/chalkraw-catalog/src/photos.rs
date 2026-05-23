@@ -93,4 +93,15 @@ mod tests {
         let missing = cat.find_photo_by_hash(&[0u8; 32]).unwrap();
         assert_eq!(missing, None);
     }
+
+    #[test]
+    fn insert_then_list_preserves_thumbnail() {
+        let (_dir, cat) = cat();
+        let mut p = Photo::new(PathBuf::from("/x/a.jpg"), [0u8; 32], 1, 1, ImageFormat::Jpeg);
+        p.thumbnail = vec![1, 2, 3, 4, 5];
+        cat.insert_photo(&p).unwrap();
+        let listed = cat.list_photos().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].thumbnail, vec![1, 2, 3, 4, 5]);
+    }
 }

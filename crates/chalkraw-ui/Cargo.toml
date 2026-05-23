@@ -21,6 +21,7 @@ egui-wgpu = { workspace = true }
 wgpu = { workspace = true }
 anyhow = { workspace = true }
 env_logger = { workspace = true }
+image = { workspace = true }
 log = { workspace = true }
 uuid = { workspace = true }
 blake3 = { workspace = true }
