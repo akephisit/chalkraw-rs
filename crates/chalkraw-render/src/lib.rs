@@ -10,4 +10,4 @@ pub use error::*;
 // pub use pipeline::*; // re-enable in Task 12
 // pub use readback::*; // re-enable in Task 13
 pub use source::*;
-// pub use uniforms::*; // re-enable in Task 10
+pub use uniforms::*;
