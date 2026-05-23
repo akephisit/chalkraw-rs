@@ -24,4 +24,3 @@ env_logger = { workspace = true }
 log = { workspace = true }
 uuid = { workspace = true }
 blake3 = { workspace = true }
-dirs = { workspace = true }
