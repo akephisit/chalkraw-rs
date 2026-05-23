@@ -15,6 +15,25 @@ const DEBOUNCE: Duration = Duration::from_millis(100);
 /// without crashing the moment a user double-clicks it.
 const EMBEDDED_FIXTURE: &[u8] = include_bytes!("../../../tests/fixtures/sample.jpg");
 
+/// Per-OS user data dir for the default catalog file. Falls back to the
+/// current directory if no data dir is available (sandboxed, root-owned home).
+///   Windows: %APPDATA%\chalkraw\default.chalkraw
+///   macOS:   ~/Library/Application Support/chalkraw/default.chalkraw
+///   Linux:   ~/.local/share/chalkraw/default.chalkraw  (or $XDG_DATA_HOME/chalkraw/)
+fn default_catalog_path() -> PathBuf {
+    let app_dir = match dirs::data_dir() {
+        Some(base) => base.join("chalkraw"),
+        None => {
+            log::warn!("no OS data dir available; storing catalog in current directory");
+            PathBuf::from(".")
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&app_dir) {
+        log::warn!("failed to create catalog dir {app_dir:?}: {e}");
+    }
+    app_dir.join("default.chalkraw")
+}
+
 pub struct AppState {
     pub edit: EditState,
     pub image: LinearImage,
@@ -90,7 +109,7 @@ impl ChalkrawApp {
             });
         let catalog_path: PathBuf = std::env::var_os("CHALKRAW_CATALOG")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("default.chalkraw"));
+            .unwrap_or_else(default_catalog_path);
         let state = AppState::bootstrap(fixture, catalog_path)?;
         Ok(Self { state, gpu: None })
     }
