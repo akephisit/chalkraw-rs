@@ -1,7 +1,9 @@
 use chalkraw_core::EditState;
 use egui::Ui;
 
-pub fn left_panel(ui: &mut Ui, _state: &mut crate::app::AppState) {
+pub fn left_panel(ui: &mut Ui, state: &mut crate::app::AppState) -> bool {
+    let mut changed = false;
+
     ui.heading("Catalog");
     ui.separator();
     ui.label("Folders");
@@ -18,8 +20,59 @@ pub fn left_panel(ui: &mut Ui, _state: &mut crate::app::AppState) {
     ui.add_space(8.0);
     ui.label("Presets");
     ui.indent("presets", |ui| {
-        ui.label("(populated in Phase 6)");
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut state.new_preset_name)
+                    .desired_width(120.0)
+                    .hint_text("preset name"),
+            );
+            if ui.button("Save").clicked() {
+                let name = std::mem::take(&mut state.new_preset_name);
+                let name = name.trim().to_string();
+                if !name.is_empty() {
+                    if let Err(e) = state.save_preset(name) {
+                        log::warn!("save preset failed: {e}");
+                    }
+                }
+            }
+        });
+        let presets = state.catalog.list_presets().unwrap_or_default();
+        if presets.is_empty() {
+            ui.label("(none yet)");
+        } else {
+            // Collect ids and names first to avoid borrow conflicts when calling
+            // state methods (which take &mut self) while iterating over presets
+            // (which borrows state.catalog).
+            let presets_view: Vec<(chalkraw_core::PresetId, String)> =
+                presets.into_iter().map(|p| (p.id, p.name)).collect();
+            let mut to_apply: Option<chalkraw_core::PresetId> = None;
+            let mut to_delete: Option<chalkraw_core::PresetId> = None;
+            for (id, name) in &presets_view {
+                ui.horizontal(|ui| {
+                    if ui.button(name).clicked() {
+                        to_apply = Some(*id);
+                    }
+                    if ui.small_button("✕").clicked() {
+                        to_delete = Some(*id);
+                    }
+                });
+            }
+            if let Some(id) = to_apply {
+                if let Err(e) = state.apply_preset(id) {
+                    log::warn!("apply preset failed: {e}");
+                } else {
+                    changed = true;
+                }
+            }
+            if let Some(id) = to_delete {
+                if let Err(e) = state.delete_preset(id) {
+                    log::warn!("delete preset failed: {e}");
+                }
+            }
+        }
     });
+
+    changed
 }
 
 pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {

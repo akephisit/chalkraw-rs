@@ -255,6 +255,80 @@ impl EditState {
     }
 }
 
+// ── Preset types ─────────────────────────────────────────────────────────────
+
+/// A reusable set of develop adjustments. Persisted in the catalog's
+/// presets table. Excludes crop, lens_correction, history, and version —
+/// those are per-photo state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DevelopPreset {
+    pub white_balance: WhiteBalance,
+    pub tone: Tone,
+    pub presence: Presence,
+    pub color: ColorMix,
+    pub tone_curve: ToneCurve,
+    pub hsl: [HslAdjustment; 8],
+    pub color_grading: ColorGrading,
+    pub detail: Detail,
+    pub effects: Effects,
+    pub parametric_curve: ParametricCurve,
+}
+
+impl From<&EditState> for DevelopPreset {
+    fn from(e: &EditState) -> Self {
+        Self {
+            white_balance: e.white_balance,
+            tone: e.tone,
+            presence: e.presence,
+            color: e.color,
+            tone_curve: e.tone_curve.clone(),
+            hsl: e.hsl,
+            color_grading: e.color_grading,
+            detail: e.detail,
+            effects: e.effects,
+            parametric_curve: e.parametric_curve,
+        }
+    }
+}
+
+impl EditState {
+    /// Overlay preset fields onto this edit state. Per-photo state (crop,
+    /// lens_correction, history, version) is preserved.
+    pub fn apply_preset(&mut self, p: &DevelopPreset) {
+        self.white_balance = p.white_balance;
+        self.tone = p.tone;
+        self.presence = p.presence;
+        self.color = p.color;
+        self.tone_curve = p.tone_curve.clone();
+        self.hsl = p.hsl;
+        self.color_grading = p.color_grading;
+        self.detail = p.detail;
+        self.effects = p.effects;
+        self.parametric_curve = p.parametric_curve;
+    }
+}
+
+pub type PresetId = uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Preset {
+    pub id: PresetId,
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub develop: DevelopPreset,
+}
+
+impl Preset {
+    pub fn new(name: String, develop: DevelopPreset) -> Self {
+        Self {
+            id: uuid::Uuid::now_v7(),
+            name,
+            created_at: chrono::Utc::now(),
+            develop,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +371,24 @@ mod tests {
         let bytes = bincode::serialize(&s).unwrap();
         let back: EditState = bincode::deserialize(&bytes).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn preset_roundtrip_through_edit_state() {
+        let mut original = EditState::default();
+        original.tone.exposure = 1.5;
+        original.color.saturation = -25.0;
+        let preset = DevelopPreset::from(&original);
+
+        let mut target = EditState {
+            crop: Some(Crop { x_pct: 0.1, y_pct: 0.1, w_pct: 0.5, h_pct: 0.5, rotation_deg: 0.0 }),
+            ..EditState::default()
+        };
+        target.apply_preset(&preset);
+
+        assert_eq!(target.tone.exposure, 1.5);
+        assert_eq!(target.color.saturation, -25.0);
+        // Per-photo state preserved.
+        assert!(target.crop.is_some());
     }
 }

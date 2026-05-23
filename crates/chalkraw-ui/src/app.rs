@@ -23,6 +23,7 @@ pub struct AppState {
     pub current_flag: Flag,
     pub catalog: Catalog,
     pub dirty_since: Option<Instant>,
+    pub new_preset_name: String,
 }
 
 impl AppState {
@@ -71,6 +72,7 @@ impl AppState {
             current_flag: photo.flag,
             catalog,
             dirty_since: None,
+            new_preset_name: String::new(),
         })
     }
 
@@ -162,6 +164,28 @@ impl AppState {
                 log::debug!("autosave committed");
             }
         }
+    }
+
+    pub fn save_preset(&self, name: String) -> anyhow::Result<()> {
+        let dp = chalkraw_core::DevelopPreset::from(&self.edit);
+        let preset = chalkraw_core::Preset::new(name, dp);
+        self.catalog.insert_preset(&preset)?;
+        Ok(())
+    }
+
+    pub fn apply_preset(&mut self, id: chalkraw_core::PresetId) -> anyhow::Result<()> {
+        let preset = self.catalog
+            .list_presets()?
+            .into_iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| anyhow::anyhow!("preset {id} not found"))?;
+        self.edit.apply_preset(&preset.develop);
+        self.mark_dirty();
+        Ok(())
+    }
+
+    pub fn delete_preset(&self, id: chalkraw_core::PresetId) -> anyhow::Result<()> {
+        self.catalog.delete_preset(id).map_err(Into::into)
     }
 }
 
@@ -322,14 +346,14 @@ impl eframe::App for ChalkrawApp {
             });
         });
 
+        let mut edit_changed = false;
         egui::SidePanel::left("left").default_width(220.0).show(ctx, |ui| {
-            left_panel(ui, &mut self.state);
+            edit_changed |= left_panel(ui, &mut self.state);
         });
 
-        let mut edit_changed = false;
         egui::SidePanel::right("right").default_width(280.0).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                edit_changed = right_panel(ui, &mut self.state.edit);
+                edit_changed |= right_panel(ui, &mut self.state.edit);
             });
         });
 
