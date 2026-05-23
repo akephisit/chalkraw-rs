@@ -85,7 +85,7 @@ fn f32_to_f16_bits(v: f32) -> u16 {
     let half_exp = (unbiased as u16) << 10;
     let half_mant = (mant >> 13) as u16;
     let round = ((mant >> 12) & 1) as u16;
-    sign | half_exp | half_mant + round
+    sign | half_exp | (half_mant + round)
 }
 
 #[cfg(test)]
@@ -112,13 +112,21 @@ mod tests {
     }
 
     #[test]
-    fn f16_roundtrip_close_for_typical_values() {
-        for v in [0.0_f32, 0.25, 0.5, 0.75, 1.0, 0.1234] {
-            let h = f32_to_f16_bits(v);
-            // Reconstruct: this is just smoke; precise checks happen in render tests.
-            assert!(h <= 0xffff);
-            let _ = h;
-            let _ = v;
+    fn f16_for_known_values_matches_ieee_754_binary16() {
+        // Known IEEE-754 binary16 bit patterns. See Wikipedia "Half-precision floating-point format".
+        let cases: &[(f32, u16)] = &[
+            (0.0,  0x0000), // +0
+            (1.0,  0x3c00), // 1.0 = 0 01111 0000000000
+            (0.5,  0x3800), // 0.5 = 0 01110 0000000000
+            (0.25, 0x3400), // 0.25 = 0 01101 0000000000
+            (2.0,  0x4000), // 2.0 = 0 10000 0000000000
+        ];
+        for &(input, expected) in cases {
+            let actual = f32_to_f16_bits(input);
+            assert_eq!(
+                actual, expected,
+                "f32_to_f16_bits({input}) = 0x{actual:04x}, expected 0x{expected:04x}"
+            );
         }
     }
 }
