@@ -85,7 +85,7 @@ pub struct GradeTone {
     pub luminance: f32,  // -100..100, identity 0
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ColorGrading {
     pub shadows: GradeTone,
     pub midtones: GradeTone,
@@ -93,6 +93,19 @@ pub struct ColorGrading {
     pub global: GradeTone,
     pub blending: f32,   // 0..100, identity 50
     pub balance: f32,    // -100..100, identity 0
+}
+
+impl Default for ColorGrading {
+    fn default() -> Self {
+        Self {
+            shadows: GradeTone::default(),
+            midtones: GradeTone::default(),
+            highlights: GradeTone::default(),
+            global: GradeTone::default(),
+            blending: 50.0,
+            balance: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -135,11 +148,17 @@ impl Default for Vignette {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Grain {
     pub amount: f32,    // 0..100, identity 0
     pub size: f32,      // 0..100, identity 25
     pub roughness: f32, // 0..100, identity 50
+}
+
+impl Default for Grain {
+    fn default() -> Self {
+        Self { amount: 0.0, size: 25.0, roughness: 50.0 }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -237,6 +256,9 @@ mod tests {
         assert_eq!(s.white_balance.temp_kelvin, 5500.0);
         assert_eq!(s.tone.exposure, 0.0);
         assert_eq!(s.tone_curve.rgb.0.len(), 2); // linear curve
+        assert_eq!(s.effects.grain.size, 25.0);
+        assert_eq!(s.effects.grain.roughness, 50.0);
+        assert_eq!(s.color_grading.blending, 50.0);
     }
 
     #[test]
