@@ -69,9 +69,8 @@ impl DevelopPipeline {
 
         let pipeline_layout = rd.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("develop pl"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            // wgpu 29: push_constant_ranges removed; uses immediate_size instead.
-            immediate_size: 0,
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
         });
 
         let pipeline = rd.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -96,7 +95,7 @@ impl DevelopPipeline {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
+            multiview: None,
             cache: None,
         });
 
@@ -107,7 +106,7 @@ impl DevelopPipeline {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
 
@@ -163,7 +162,6 @@ impl DevelopPipeline {
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
-                multiview_mask: None,
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, bind_group, &[]);

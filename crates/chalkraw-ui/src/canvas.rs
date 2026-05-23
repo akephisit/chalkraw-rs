@@ -36,11 +36,12 @@ impl CanvasGpu {
 /// One-frame draw callback that the egui-wgpu integration runs inside the
 /// current render pass.
 ///
-/// # egui-wgpu 0.34 API notes
+/// # egui-wgpu 0.33.3 API notes
 ///
 /// `CallbackTrait::paint` takes `&mut wgpu::RenderPass<'static>` — the `'static`
-/// lifetime is intentional (the renderer uses `forget_lifetime` internally so
-/// callbacks operate on a `'static`-erased pass).
+/// lifetime is intentional in this version (the renderer uses `forget_lifetime`
+/// internally so callbacks operate on a `'static`-erased pass). The spec draft
+/// showed `'_`; the actual trait requires `'static`.
 pub struct CanvasCallback {
     pub gpu: Arc<CanvasGpu>,
 }
