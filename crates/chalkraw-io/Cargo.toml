@@ -10,3 +10,6 @@ chalkraw-core = { workspace = true }
 image = { workspace = true }
 kamadak-exif = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
