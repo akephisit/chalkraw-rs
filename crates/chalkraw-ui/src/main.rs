@@ -1,7 +1,3 @@
-// Hide the Windows console for release builds (still visible in debug so dev
-// builds can see env_logger output).
-#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
-
 mod app;
 mod canvas;
 mod panels;
