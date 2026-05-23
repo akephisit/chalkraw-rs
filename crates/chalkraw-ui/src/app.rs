@@ -1,7 +1,7 @@
 use crate::canvas::{CanvasCallback, CanvasGpu};
 use crate::panels::{left_panel, right_panel};
 use chalkraw_catalog::Catalog;
-use chalkraw_core::{EditState, ImageFormat, Photo, PhotoId};
+use chalkraw_core::{EditState, Flag, ImageFormat, Photo, PhotoId};
 use chalkraw_io::{decode_image, decode_image_bytes, LinearImage};
 use chalkraw_render::RenderDevice;
 use std::collections::HashMap;
@@ -20,6 +20,7 @@ pub struct AppState {
     pub edit: EditState,
     pub image: LinearImage,
     pub photo_id: PhotoId,
+    pub current_flag: Flag,
     pub catalog: Catalog,
     pub dirty_since: Option<Instant>,
 }
@@ -67,6 +68,7 @@ impl AppState {
             edit,
             image,
             photo_id: photo.id,
+            current_flag: photo.flag,
             catalog,
             dirty_since: None,
         })
@@ -100,6 +102,7 @@ impl AppState {
 
         self.image = image;
         self.photo_id = photo.id;
+        self.current_flag = photo.flag;
         self.edit = edit;
         self.dirty_since = None;
         Ok(())
@@ -137,6 +140,14 @@ impl AppState {
             inserted += 1;
         }
         Ok(inserted)
+    }
+
+    pub fn set_current_flag(&mut self, flag: Flag) {
+        if let Err(e) = self.catalog.update_flag(self.photo_id, flag) {
+            log::warn!("set flag failed: {e}");
+        } else {
+            self.current_flag = flag;
+        }
     }
 
     pub fn mark_dirty(&mut self) { self.dirty_since = Some(Instant::now()); }
@@ -234,6 +245,23 @@ impl eframe::App for ChalkrawApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.ensure_gpu(frame);
 
+        // Flag keyboard shortcuts: P=Pick, U=None, X=Reject (Lightroom convention).
+        // Collect key presses inside the closure then dispatch outside to avoid
+        // a borrow-checker conflict between ctx.input and self.state.
+        let mut to_set: Option<Flag> = None;
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::P) {
+                to_set = Some(Flag::Pick);
+            } else if i.key_pressed(egui::Key::U) {
+                to_set = Some(Flag::None);
+            } else if i.key_pressed(egui::Key::X) {
+                to_set = Some(Flag::Reject);
+            }
+        });
+        if let Some(f) = to_set {
+            self.state.set_current_flag(f);
+        }
+
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -272,7 +300,7 @@ impl eframe::App for ChalkrawApp {
                 ui.menu_button("Develop", |ui| { ui.label("(Phase 2)"); });
                 ui.menu_button("Export", |ui| { ui.label("(Phase 7)"); });
                 let path = self.state.catalog.path().display().to_string();
-                ui.label(format!("  catalog: {path}"));
+                ui.label(format!("  catalog: {path}  |  P=Pick  U=None  X=Reject"));
             });
         });
 
@@ -303,18 +331,32 @@ impl eframe::App for ChalkrawApp {
             let mut clicked: Option<PathBuf> = None;
             // Collect thumbnails first so the mutable borrow of self (for
             // ensure_thumb) is released before entering the ScrollArea closure.
-            let thumbs: Vec<(PhotoId, PathBuf, egui::TextureHandle)> = photos.iter()
+            let thumbs: Vec<(PhotoId, PathBuf, egui::TextureHandle, Flag)> = photos.iter()
                 .map(|p| {
                     let tex = self.ensure_thumb(ctx, p);
-                    (p.id, p.original_path.clone(), tex)
+                    (p.id, p.original_path.clone(), tex, p.flag)
                 })
                 .collect();
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for (pid, path, tex) in &thumbs {
+                    for (pid, path, tex, flag) in &thumbs {
                         let is_current = *pid == current_id;
                         let img = egui::Image::new(tex).max_height(100.0).max_width(140.0);
                         let response = ui.add(img.sense(egui::Sense::click()));
+                        // Draw flag-colour outline first, then current-selection gold on top.
+                        let flag_color = match flag {
+                            Flag::Pick   => Some(egui::Color32::from_rgb(80, 200, 80)),
+                            Flag::Reject => Some(egui::Color32::from_rgb(220, 80, 80)),
+                            Flag::None   => None,
+                        };
+                        if let Some(c) = flag_color {
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                2.0,
+                                egui::Stroke::new(2.0, c),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
                         if is_current {
                             ui.painter().rect_stroke(
                                 response.rect,

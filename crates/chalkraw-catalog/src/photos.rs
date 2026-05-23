@@ -1,6 +1,6 @@
 use crate::catalog::{Catalog, PHOTOS_TABLE};
 use crate::error::CatalogError;
-use chalkraw_core::{Photo, PhotoId};
+use chalkraw_core::{Flag, Photo, PhotoId};
 use redb::{ReadableDatabase, ReadableTable};
 
 impl Catalog {
@@ -34,6 +34,12 @@ impl Catalog {
         Ok(out)
     }
 
+    pub fn update_flag(&self, id: PhotoId, flag: Flag) -> Result<(), CatalogError> {
+        let mut photo = self.get_photo(id)?;
+        photo.flag = flag;
+        self.insert_photo(&photo)
+    }
+
     pub fn find_photo_by_hash(&self, hash: &[u8; 32]) -> Result<Option<Photo>, CatalogError> {
         let read = self.db().begin_read()?;
         let tbl = read.open_table(PHOTOS_TABLE)?;
@@ -51,7 +57,7 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chalkraw_core::{ImageFormat, Photo};
+    use chalkraw_core::{Flag, ImageFormat, Photo};
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -92,6 +98,19 @@ mod tests {
         assert_eq!(found, Some(p));
         let missing = cat.find_photo_by_hash(&[0u8; 32]).unwrap();
         assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn update_flag_round_trips() {
+        let (_dir, cat) = cat();
+        let p = Photo::new(PathBuf::from("/x/a.jpg"), [0u8; 32], 1, 1, ImageFormat::Jpeg);
+        cat.insert_photo(&p).unwrap();
+        cat.update_flag(p.id, Flag::Pick).unwrap();
+        assert_eq!(cat.get_photo(p.id).unwrap().flag, Flag::Pick);
+        cat.update_flag(p.id, Flag::Reject).unwrap();
+        assert_eq!(cat.get_photo(p.id).unwrap().flag, Flag::Reject);
+        cat.update_flag(p.id, Flag::None).unwrap();
+        assert_eq!(cat.get_photo(p.id).unwrap().flag, Flag::None);
     }
 
     #[test]
