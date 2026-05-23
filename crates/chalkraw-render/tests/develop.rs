@@ -3,7 +3,7 @@
 /// Each test uploads a known solid-colour source, sets one slider, renders,
 /// and asserts the central pixel moved in the expected direction.  All tests
 /// skip gracefully when no GPU adapter is available (CI / sandbox).
-use chalkraw_core::EditState;
+use chalkraw_core::{Crop, EditState};
 use chalkraw_render::{
     make_target, read_to_cpu, DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice,
     SourceTexture,
@@ -345,6 +345,107 @@ fn parametric_highlights_minus_50_dims_bright_pixels() {
     assert!(
         p[0] < base_p[0],
         "parametric highlights -50 should dim bright pixel (0.9 grey); got {p:?} vs base {base_p:?}"
+    );
+}
+
+// ── Phase 2F tests ────────────────────────────────────────────────────────────
+
+/// Lens distortion = 50 (barrel) on a solid grey source: the centre pixel must
+/// stay the same brightness (the UV distortion formula leaves the exact centre
+/// unchanged because r2 = 0 at (0.5, 0.5)).
+#[test]
+fn lens_distortion_positive_keeps_centre_unchanged() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skipping: no GPU"); return; }
+    };
+    let (w, h) = (32, 32);
+    let grey_val = 0.5_f32;
+
+    let base_edit = EditState::default();
+    let base_pixels = render_solid(&rd, w, h, solid_grey(w, h, grey_val), &base_edit);
+    let base_p = pixel_at(&base_pixels, w, w / 2, h / 2);
+
+    let mut edit = EditState::default();
+    edit.lens_correction.distortion = 50.0;
+    let pixels = render_solid(&rd, w, h, solid_grey(w, h, grey_val), &edit);
+    let p = pixel_at(&pixels, w, w / 2, h / 2);
+
+    // Centre pixel must be within 2 bytes of baseline (distortion = 0 at centre).
+    let diff = (p[0] as i32 - base_p[0] as i32).unsigned_abs();
+    assert!(
+        diff <= 2,
+        "lens distortion should leave centre pixel unchanged; base={base_p:?} distorted={p:?}"
+    );
+}
+
+/// Lens vignetting correction = 100 on solid grey: corner pixel should be
+/// brighter than the centre pixel (radial brightening compensates falloff).
+#[test]
+fn lens_vignetting_brightens_corner() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skipping: no GPU"); return; }
+    };
+    let (w, h) = (32, 32);
+
+    let mut edit = EditState::default();
+    edit.lens_correction.vignetting = 100.0;
+
+    let pixels = render_solid(&rd, w, h, solid_grey(w, h, 0.5), &edit);
+
+    let centre = pixel_at(&pixels, w, w / 2, h / 2);
+    let corner = pixel_at(&pixels, w, 0, 0);
+
+    assert!(
+        corner[0] > centre[0],
+        "lens vignetting correction 100 should brighten corner vs centre; corner={} centre={}",
+        corner[0], centre[0]
+    );
+}
+
+/// Crop enabled with top-left quadrant (x=0,y=0,w=0.5,h=0.5): the output
+/// centre pixel should be sampled from source position (0.25, 0.25), not (0.5,
+/// 0.5). We verify this by checking the brightness changes relative to a
+/// non-uniform source.
+///
+/// Source: top-left half at 0.2, bottom-right half at 0.8.  With crop enabled
+/// the output centre maps to (0.25, 0.25) → the darker half → centre byte
+/// should be darker than baseline (no crop, samples 0.5-grey average area).
+#[test]
+fn crop_enabled_top_left_quadrant_samples_correct_region() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skipping: no GPU"); return; }
+    };
+    let (w, h) = (32u32, 32u32);
+
+    // Build a source where the top-left quadrant is dark (0.2) and the
+    // bottom-right quadrant is bright (0.8). The other two quadrants are 0.5.
+    let source: Vec<f32> = (0..w * h).flat_map(|i| {
+        let px = i % w;
+        let py = i / w;
+        let v = if px < w / 2 && py < h / 2 { 0.2_f32 } else { 0.8_f32 };
+        [v, v, v, 1.0_f32]
+    }).collect();
+
+    // Baseline: no crop, output centre maps to source (0.5, 0.5) → bright region.
+    let base_edit = EditState::default();
+    let base_pixels = render_solid(&rd, w, h, source.clone(), &base_edit);
+    let base_centre = pixel_at(&base_pixels, w, w / 2, h / 2);
+
+    // With crop: top-left quadrant only. Output centre → source (0.25, 0.25) → dark region.
+    let edit = EditState {
+        crop: Some(Crop { x_pct: 0.0, y_pct: 0.0, w_pct: 0.5, h_pct: 0.5, rotation_deg: 0.0 }),
+        ..EditState::default()
+    };
+    let crop_pixels = render_solid(&rd, w, h, source, &edit);
+    let crop_centre = pixel_at(&crop_pixels, w, w / 2, h / 2);
+
+    assert!(
+        crop_centre[0] < base_centre[0],
+        "crop top-left quadrant: centre should sample dark region (R={}) vs no-crop bright (R={})",
+        crop_centre[0], base_centre[0]
     );
 }
 

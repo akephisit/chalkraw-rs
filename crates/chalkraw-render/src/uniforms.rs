@@ -45,7 +45,19 @@ use chalkraw_core::EditState;
 /// 272  cg_blend_balance [f32;4]  [blending, balance, 0, 0]
 /// Phase 2D (Parametric Curve): 1 × vec4<f32> = 16 bytes.
 /// 288  param_curve      [f32;4]  [shadows, darks, lights, highlights]
-/// Total: 304 bytes
+/// Phase 2F (Lens Correction): 2 × f32 + 2 pad = 16 bytes.
+/// 304  lens_distortion  f32
+/// 308  lens_vignetting  f32
+/// 312  _pad_lens        [f32;2]
+/// Phase 2F (Crop): 6 × f32 + 2 pad = 32 bytes.
+/// 320  crop_enabled     f32
+/// 324  crop_x           f32
+/// 328  crop_y           f32
+/// 332  crop_w           f32
+/// 336  crop_h           f32
+/// 340  crop_rotation_deg f32
+/// 344  _pad_crop        [f32;2]
+/// Total: 352 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct EditUniforms {
@@ -91,6 +103,18 @@ pub struct EditUniforms {
     pub cg_blend_balance: [f32; 4], // offset 272  [blending, balance, 0, 0]
     // Phase 2D (Parametric Curve): 1 × vec4<f32> = 16 bytes.
     pub param_curve: [f32; 4],      // offset 288  [shadows, darks, lights, highlights]
+    // Phase 2F (Lens Correction): distortion + vignetting + 2-float pad = 16 bytes.
+    pub lens_distortion: f32,       // offset 304
+    pub lens_vignetting: f32,       // offset 308
+    pub _pad_lens: [f32; 2],        // offset 312  → pads to 320
+    // Phase 2F (Crop): crop_enabled + x/y/w/h + rotation + 2-float pad = 32 bytes.
+    pub crop_enabled: f32,          // offset 320  (0.0 = disabled, 1.0 = enabled)
+    pub crop_x: f32,                // offset 324  0..1
+    pub crop_y: f32,                // offset 328  0..1
+    pub crop_w: f32,                // offset 332  0..1 (right edge = crop_x + crop_w)
+    pub crop_h: f32,                // offset 336  0..1
+    pub crop_rotation_deg: f32,     // offset 340
+    pub _pad_crop: [f32; 2],        // offset 344  → pads to 352
 }
 
 impl From<&EditState> for EditUniforms {
@@ -142,6 +166,18 @@ impl From<&EditState> for EditUniforms {
                 e.parametric_curve.lights,
                 e.parametric_curve.highlights,
             ],
+            // Phase 2F: Lens Correction.
+            lens_distortion: e.lens_correction.distortion,
+            lens_vignetting: e.lens_correction.vignetting,
+            _pad_lens: [0.0; 2],
+            // Phase 2F: Crop.
+            crop_enabled: if e.crop.is_some() { 1.0 } else { 0.0 },
+            crop_x: e.crop.map(|c| c.x_pct).unwrap_or(0.0),
+            crop_y: e.crop.map(|c| c.y_pct).unwrap_or(0.0),
+            crop_w: e.crop.map(|c| c.w_pct).unwrap_or(1.0),
+            crop_h: e.crop.map(|c| c.h_pct).unwrap_or(1.0),
+            crop_rotation_deg: e.crop.map(|c| c.rotation_deg).unwrap_or(0.0),
+            _pad_crop: [0.0; 2],
         }
     }
 }
@@ -152,14 +188,15 @@ mod tests {
 
     #[test]
     fn edit_uniforms_size_matches_wgsl() {
-        // Must be 304 bytes to match the WGSL EditUniforms struct layout.
+        // Must be 352 bytes to match the WGSL EditUniforms struct layout.
         // Phase 2A: 128 bytes. Phase 2B adds 6 × vec4<f32> = 96 bytes → 224.
         // Phase 2C adds 4 × vec4<f32> = 64 bytes → 288.
         // Phase 2D adds 1 × vec4<f32> = 16 bytes → 304.
+        // Phase 2F adds lens (16 bytes) + crop (32 bytes) = 48 bytes → 352.
         // If this fails, check that the Rust and WGSL fields are in sync.
         assert_eq!(
             std::mem::size_of::<EditUniforms>(),
-            304,
+            352,
             "EditUniforms size mismatch — Rust and WGSL structs are out of sync"
         );
     }

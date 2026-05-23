@@ -1,4 +1,4 @@
-// chalkraw-rs develop shader — Phase 2D: Parametric Tone Curve.
+// chalkraw-rs develop shader — Phase 2F: Lens Correction + Slider-based Crop.
 // Operations are applied in Lightroom order: WB → Exposure → Contrast →
 // Highlights/Shadows/Whites/Blacks → Saturation → HSL → Color Grading →
 // Parametric Curve → Vibrance → Vignette → Grain.
@@ -50,7 +50,19 @@
 // 272   cg_blend_balance vec4<f32> [blending, balance, 0, 0]
 // Phase 2D (Parametric Curve): 1 × vec4<f32> = 16 bytes.
 // 288   param_curve    vec4<f32>   [shadows, darks, lights, highlights]
-// Total: 304 bytes.
+// Phase 2F (Lens Correction): 2 × f32 + vec2<f32> pad = 16 bytes.
+// 304   lens_distortion  f32
+// 308   lens_vignetting  f32
+// 312   _pad_lens        vec2<f32>
+// Phase 2F (Crop): 6 × f32 + vec2<f32> pad = 32 bytes.
+// 320   crop_enabled     f32
+// 324   crop_x           f32
+// 328   crop_y           f32
+// 332   crop_w           f32
+// 336   crop_h           f32
+// 340   crop_rotation_deg f32
+// 344   _pad_crop        vec2<f32>
+// Total: 352 bytes.
 
 struct EditUniforms {
     exposure:           f32,
@@ -90,6 +102,18 @@ struct EditUniforms {
     cg_blend_balance:   vec4<f32>,   // [blending, balance, 0, 0]
     // Phase 2D: Parametric Curve (1 × vec4<f32>, offset 288..304).
     param_curve:        vec4<f32>,   // [shadows, darks, lights, highlights]
+    // Phase 2F: Lens Correction (offset 304..320).
+    lens_distortion:    f32,
+    lens_vignetting:    f32,
+    _pad_lens:          vec2<f32>,
+    // Phase 2F: Crop (offset 320..352).
+    crop_enabled:       f32,
+    crop_x:             f32,
+    crop_y:             f32,
+    crop_w:             f32,
+    crop_h:             f32,
+    crop_rotation_deg:  f32,
+    _pad_crop:          vec2<f32>,
 };
 
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
@@ -166,8 +190,32 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    var rgb = textureSample(source_tex, source_sampler, in.uv).rgb;
-    let a = textureSample(source_tex, source_sampler, in.uv).a;
+    // Phase 2F: crop maps output UV (0..1) → source UV inside the crop rect.
+    // Plus rotation around the canvas centre (degrees → radians).
+    var uv = in.uv;
+    if (edit.crop_enabled > 0.5) {
+        let rad = edit.crop_rotation_deg * 3.14159265 / 180.0;
+        let cs = cos(rad);
+        let sn = sin(rad);
+        // Centre output around (0.5, 0.5) so rotation pivots at canvas centre.
+        let centred = uv - vec2<f32>(0.5);
+        let rotated = vec2<f32>(centred.x * cs - centred.y * sn,
+                                centred.x * sn + centred.y * cs);
+        let recentred = rotated + vec2<f32>(0.5);
+        // Map recentred (0..1) into the crop rectangle inside source.
+        uv = vec2<f32>(edit.crop_x + recentred.x * edit.crop_w,
+                       edit.crop_y + recentred.y * edit.crop_h);
+    }
+
+    // Phase 2F: lens distortion. Positive = barrel (pull outwards), negative = pincushion.
+    let centre_uv = vec2<f32>(0.5);
+    let r2 = dot(uv - centre_uv, uv - centre_uv);
+    let k = edit.lens_distortion / 100.0 * 0.5;
+    uv = centre_uv + (uv - centre_uv) * (1.0 + k * r2);
+
+    let sample = textureSample(source_tex, source_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)));
+    var rgb = sample.rgb;
+    let a = sample.a;
 
     // 1. White Balance — simple per-channel temperature/tint multipliers.
     //    delta_k ≈ [-0.7, 0.7] across the typical 2000–10000 K range.
@@ -316,6 +364,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let h = fract(sin(dot(in.uv * scale, vec2<f32>(127.1, 311.7))) * 43758.5453);
     let noise = (h - 0.5) * edit.grain_amount / 100.0 * 0.3;
     rgb += vec3<f32>(noise);
+
+    // Phase 2F: lens vignetting correction — radial brightening to compensate
+    // physical falloff. Distinct from Effects.Vignette which is creative darkening.
+    let r_corr = length(uv - centre_uv) * 1.41421356;  // sqrt(2) normalises corner to 1.0
+    let lv_amount = edit.lens_vignetting / 100.0;
+    rgb *= 1.0 + lv_amount * r_corr * r_corr * 0.5;
 
     return vec4<f32>(max(rgb, vec3<f32>(0.0)), a);
 }

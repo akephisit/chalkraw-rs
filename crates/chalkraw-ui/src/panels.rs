@@ -300,12 +300,43 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
     // ── Lens Correction (Phase 2F) ────────────────────────────────────────────
     egui::CollapsingHeader::new("Lens Correction")
         .default_open(false)
-        .show(ui, |ui| { ui.label("(Phase 2F)"); });
+        .show(ui, |ui| {
+            ui.label("Distortion");
+            if ui.add(egui::Slider::new(&mut edit.lens_correction.distortion, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+            ui.label("Vignetting (correction)");
+            if ui.add(egui::Slider::new(&mut edit.lens_correction.vignetting, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+        });
 
     // ── Geometry / Crop (Phase 2F) ────────────────────────────────────────────
     egui::CollapsingHeader::new("Geometry")
         .default_open(false)
-        .show(ui, |ui| { ui.label("(Phase 2F)"); });
+        .show(ui, |ui| {
+            let mut enabled = edit.crop.is_some();
+            let was_enabled = enabled;
+            if ui.checkbox(&mut enabled, "Crop enabled").changed() { changed = true; }
+            if enabled && !was_enabled {
+                // Initialise default crop to full image so the slider state is sane.
+                edit.crop = Some(chalkraw_core::Crop {
+                    x_pct: 0.0, y_pct: 0.0, w_pct: 1.0, h_pct: 1.0, rotation_deg: 0.0,
+                });
+            } else if !enabled && was_enabled {
+                edit.crop = None;
+            }
+            if let Some(crop) = edit.crop.as_mut() {
+                ui.label("X");
+                if ui.add(egui::Slider::new(&mut crop.x_pct, 0.0..=1.0).fixed_decimals(2)).changed() { changed = true; }
+                ui.label("Y");
+                if ui.add(egui::Slider::new(&mut crop.y_pct, 0.0..=1.0).fixed_decimals(2)).changed() { changed = true; }
+                ui.label("Width");
+                if ui.add(egui::Slider::new(&mut crop.w_pct, 0.01..=1.0).fixed_decimals(2)).changed() { changed = true; }
+                ui.label("Height");
+                if ui.add(egui::Slider::new(&mut crop.h_pct, 0.01..=1.0).fixed_decimals(2)).changed() { changed = true; }
+                ui.label("Rotation");
+                if ui.add(egui::Slider::new(&mut crop.rotation_deg, -45.0..=45.0).fixed_decimals(1).suffix("°")).changed() { changed = true; }
+            }
+            ui.add_space(4.0);
+            ui.label("Drag-rectangle crop UI — coming with Phase 3 import flow");
+        });
 
     changed
 }
