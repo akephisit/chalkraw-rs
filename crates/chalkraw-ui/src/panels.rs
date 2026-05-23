@@ -119,7 +119,47 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
     // ── HSL (Phase 2B) ────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("HSL")
         .default_open(false)
-        .show(ui, |ui| { ui.label("(Phase 2B)"); });
+        .show(ui, |ui| {
+            let names: [(&str, egui::Color32); 8] = [
+                ("Red",     egui::Color32::from_rgb(220, 60, 60)),
+                ("Orange",  egui::Color32::from_rgb(230, 140, 50)),
+                ("Yellow",  egui::Color32::from_rgb(230, 220, 50)),
+                ("Green",   egui::Color32::from_rgb(80, 200, 80)),
+                ("Aqua",    egui::Color32::from_rgb(80, 200, 220)),
+                ("Blue",    egui::Color32::from_rgb(80, 120, 230)),
+                ("Purple",  egui::Color32::from_rgb(160, 80, 230)),
+                ("Magenta", egui::Color32::from_rgb(220, 80, 200)),
+            ];
+            for (i, (name, swatch)) in names.iter().enumerate() {
+                let header = egui::RichText::new(*name).color(*swatch);
+                egui::CollapsingHeader::new(header)
+                    .id_salt(format!("hsl_{i}"))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label("Hue");
+                        if ui.add(
+                            egui::Slider::new(&mut edit.hsl[i].hue, -100.0..=100.0)
+                                .fixed_decimals(0),
+                        ).changed() {
+                            changed = true;
+                        }
+                        ui.label("Saturation");
+                        if ui.add(
+                            egui::Slider::new(&mut edit.hsl[i].saturation, -100.0..=100.0)
+                                .fixed_decimals(0),
+                        ).changed() {
+                            changed = true;
+                        }
+                        ui.label("Luminance");
+                        if ui.add(
+                            egui::Slider::new(&mut edit.hsl[i].luminance, -100.0..=100.0)
+                                .fixed_decimals(0),
+                        ).changed() {
+                            changed = true;
+                        }
+                    });
+            }
+        });
 
     // ── Color Grading (Phase 2C) ──────────────────────────────────────────────
     egui::CollapsingHeader::new("Color Grading")

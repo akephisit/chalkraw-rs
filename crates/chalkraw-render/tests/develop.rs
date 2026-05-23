@@ -167,6 +167,66 @@ fn grain_amount_50_introduces_variation() {
         "grain should introduce per-pixel variation; all pixels had same R={:?}", unique_r);
 }
 
+/// HSL red hue shift: solid red input with hsl[0].hue=50 should rotate the
+/// red hue, reducing R and increasing G (shifting toward orange/yellow).
+#[test]
+fn hsl_red_hue_shift_rotates_red() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skipping: no GPU"); return; }
+    };
+    let (w, h) = (16, 16);
+
+    // Baseline: pure red, no HSL edit.
+    let base_edit = EditState::default();
+    let base_pixels = render_solid(&rd, w, h, solid_image(w, h, 0.8, 0.0, 0.0), &base_edit);
+    let base_p = pixel_at(&base_pixels, w, 8, 8);
+
+    // With red-band hue shift of +50 (→ +18° toward orange/yellow):
+    // R should decrease and G should increase compared to baseline.
+    let mut edit = EditState::default();
+    edit.hsl[0].hue = 50.0; // red band
+    let pixels = render_solid(&rd, w, h, solid_image(w, h, 0.8, 0.0, 0.0), &edit);
+    let p = pixel_at(&pixels, w, 8, 8);
+
+    assert!(
+        p[0] < base_p[0] || p[1] > base_p[1],
+        "hsl red hue +50 should shift hue (R down or G up); base={base_p:?} shifted={p:?}"
+    );
+}
+
+/// HSL blue saturation -100: solid blue input should become near-grey,
+/// while a solid red input with the same edit should remain saturated.
+#[test]
+fn hsl_blue_saturation_minus_100_desaturates_only_blue() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skipping: no GPU"); return; }
+    };
+    let (w, h) = (16, 16);
+
+    let mut edit = EditState::default();
+    edit.hsl[5].saturation = -100.0; // blue band (index 5)
+
+    // Solid blue → should become near-grey (R ≈ G ≈ B).
+    let blue_pixels = render_solid(&rd, w, h, solid_image(w, h, 0.0, 0.0, 0.8), &edit);
+    let blue_p = pixel_at(&blue_pixels, w, 8, 8);
+    let diff_rg_blue = (blue_p[0] as i32 - blue_p[1] as i32).unsigned_abs();
+    let diff_rb_blue = (blue_p[0] as i32 - blue_p[2] as i32).unsigned_abs();
+    assert!(
+        diff_rg_blue <= 10 && diff_rb_blue <= 10,
+        "hsl blue sat -100 on blue pixel should produce near-grey; got {blue_p:?}"
+    );
+
+    // Solid red → should remain saturated (R >> G and R >> B).
+    let red_pixels = render_solid(&rd, w, h, solid_image(w, h, 0.8, 0.0, 0.0), &edit);
+    let red_p = pixel_at(&red_pixels, w, 8, 8);
+    assert!(
+        red_p[0] > red_p[1] + 50,
+        "hsl blue sat -100 should not desaturate red pixel; got {red_p:?}"
+    );
+}
+
 /// Vibrance=+100 on a near-grey pixel should boost saturation more than
 /// Vibrance=0, but not exceed what full Saturation=+100 would do.
 #[test]

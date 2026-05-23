@@ -31,7 +31,14 @@ use chalkraw_core::EditState;
 /// 116  grain_size       f32
 /// 120  grain_roughness  f32
 /// 124  _pad_grain       f32
-/// Total: 128 bytes
+/// Phase 2B (HSL): 8 colors × {hue, sat, lum}, stored as 6 vec4 chunks of 4 colors each.
+/// 128  hsl_hue_a        [f32;4]  red, orange, yellow, green
+/// 144  hsl_hue_b        [f32;4]  aqua, blue, purple, magenta
+/// 160  hsl_sat_a        [f32;4]
+/// 176  hsl_sat_b        [f32;4]
+/// 192  hsl_lum_a        [f32;4]
+/// 208  hsl_lum_b        [f32;4]
+/// Total: 224 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct EditUniforms {
@@ -62,10 +69,21 @@ pub struct EditUniforms {
     pub grain_size: f32,        // offset 116
     pub grain_roughness: f32,   // offset 120  (reserved; no shader effect in 2A)
     pub _pad_grain: f32,        // offset 124  → pads to 128
+    // Phase 2B (HSL): 8 colors × {hue, sat, lum}, stored as 6 vec4 chunks of 4 colors each.
+    // Each [f32; 4] is naturally 16-byte aligned, matching WGSL vec4<f32>.
+    pub hsl_hue_a: [f32; 4],   // offset 128  red, orange, yellow, green
+    pub hsl_hue_b: [f32; 4],   // offset 144  aqua, blue, purple, magenta
+    pub hsl_sat_a: [f32; 4],   // offset 160
+    pub hsl_sat_b: [f32; 4],   // offset 176
+    pub hsl_lum_a: [f32; 4],   // offset 192
+    pub hsl_lum_b: [f32; 4],   // offset 208
 }
 
 impl From<&EditState> for EditUniforms {
     fn from(e: &EditState) -> Self {
+        // HSL: 8 bands in order red(0), orange(1), yellow(2), green(3),
+        //                       aqua(4), blue(5), purple(6), magenta(7).
+        let h = &e.hsl;
         Self {
             exposure: e.tone.exposure,
             _pre_pad: [0.0; 3],
@@ -92,6 +110,12 @@ impl From<&EditState> for EditUniforms {
             grain_size: e.effects.grain.size,
             grain_roughness: e.effects.grain.roughness,
             _pad_grain: 0.0,
+            hsl_hue_a: [h[0].hue, h[1].hue, h[2].hue, h[3].hue],
+            hsl_hue_b: [h[4].hue, h[5].hue, h[6].hue, h[7].hue],
+            hsl_sat_a: [h[0].saturation, h[1].saturation, h[2].saturation, h[3].saturation],
+            hsl_sat_b: [h[4].saturation, h[5].saturation, h[6].saturation, h[7].saturation],
+            hsl_lum_a: [h[0].luminance, h[1].luminance, h[2].luminance, h[3].luminance],
+            hsl_lum_b: [h[4].luminance, h[5].luminance, h[6].luminance, h[7].luminance],
         }
     }
 }
@@ -102,11 +126,12 @@ mod tests {
 
     #[test]
     fn edit_uniforms_size_matches_wgsl() {
-        // Must be 128 bytes to match the WGSL EditUniforms struct layout.
+        // Must be 224 bytes to match the WGSL EditUniforms struct layout.
+        // Phase 2A: 128 bytes. Phase 2B adds 6 × vec4<f32> = 96 bytes → 224.
         // If this fails, check that the Rust and WGSL fields are in sync.
         assert_eq!(
             std::mem::size_of::<EditUniforms>(),
-            128,
+            224,
             "EditUniforms size mismatch — Rust and WGSL structs are out of sync"
         );
     }

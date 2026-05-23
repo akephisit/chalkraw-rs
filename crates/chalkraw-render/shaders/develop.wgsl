@@ -1,9 +1,10 @@
-// chalkraw-rs develop shader — Phase 2A: per-pixel basic develop sliders.
+// chalkraw-rs develop shader — Phase 2B: HSL per-band adjustments added.
 // Operations are applied in Lightroom order: WB → Exposure → Contrast →
-// Highlights/Shadows/Whites/Blacks → Saturation → Vibrance → Vignette → Grain.
+// Highlights/Shadows/Whites/Blacks → Saturation → HSL → Vibrance → Vignette → Grain.
 //
 // The WGSL struct layout must stay byte-for-byte in sync with EditUniforms in
-// uniforms.rs (total 128 bytes = 32 f32 values). WGSL alignment rules:
+// uniforms.rs (total 224 bytes). WGSL alignment rules:
+//   vec4<f32> → align 16, size 16
 //   vec3<f32> → align 16, size 12
 //   vec2<f32> → align  8, size  8
 //   f32       → align  4, size  4
@@ -34,7 +35,14 @@
 // 116   grain_size         f32
 // 120   grain_roughness    f32   (reserved; no shader effect in Phase 2A)
 // 124   _pad_grain         f32
-// Total: 128 bytes.
+// Phase 2B (HSL): 8 colors × {hue, sat, lum}, 6 × vec4<f32> = 96 bytes.
+// 128   hsl_hue_a      vec4<f32>   red, orange, yellow, green
+// 144   hsl_hue_b      vec4<f32>   aqua, blue, purple, magenta
+// 160   hsl_sat_a      vec4<f32>
+// 176   hsl_sat_b      vec4<f32>
+// 192   hsl_lum_a      vec4<f32>
+// 208   hsl_lum_b      vec4<f32>
+// Total: 224 bytes.
 
 struct EditUniforms {
     exposure:           f32,
@@ -60,11 +68,35 @@ struct EditUniforms {
     grain_size:         f32,
     grain_roughness:    f32,
     _pad_grain:         f32,
+    // Phase 2B: HSL per-band adjustments (6 × vec4<f32>, offset 128..224).
+    hsl_hue_a:          vec4<f32>,   // red, orange, yellow, green
+    hsl_hue_b:          vec4<f32>,   // aqua, blue, purple, magenta
+    hsl_sat_a:          vec4<f32>,
+    hsl_sat_b:          vec4<f32>,
+    hsl_lum_a:          vec4<f32>,
+    hsl_lum_b:          vec4<f32>,
 };
 
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
 @group(0) @binding(1) var source_sampler: sampler;
 @group(0) @binding(2) var<uniform> edit: EditUniforms;
+
+// ── HSV conversion helpers (Sam Hocevar's branchless algorithm) ───────────────
+
+fn rgb_to_hsv(c: vec3<f32>) -> vec3<f32> {
+    let K = vec4<f32>(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    let p = mix(vec4<f32>(c.bg, K.wz), vec4<f32>(c.gb, K.xy), step(c.b, c.g));
+    let q = mix(vec4<f32>(p.xyw, c.r), vec4<f32>(c.r, p.yzx), step(p.x, c.r));
+    let d = q.x - min(q.w, q.y);
+    let e = 1.0e-10;
+    return vec3<f32>(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+
+fn hsv_to_rgb(c: vec3<f32>) -> vec3<f32> {
+    let K = vec4<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    let p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, vec3<f32>(0.0), vec3<f32>(1.0)), c.y);
+}
 
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
@@ -124,6 +156,56 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // 5. Saturation — blend toward/away from luminance grey.
     let gray_sat = vec3<f32>(dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722)));
     rgb = mix(gray_sat, rgb, 1.0 + edit.saturation / 100.0);
+
+    // 5b. HSL — per-band hue/saturation/luminance adjustments.
+    //     Lightroom-style: each of 8 colour bands has a linear falloff around its
+    //     centre hue (band_width = 45°). Pixels near the centre get the full
+    //     adjustment; pixels outside the band get none.
+    {
+        let hsv = rgb_to_hsv(rgb);
+        let h_deg = hsv.x * 360.0;
+
+        // Band centres in degrees (must match EditState hsl array order).
+        let centres = array<f32, 8>(0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 270.0, 300.0);
+
+        // Unpack the 6 vec4 chunks into per-band arrays.
+        let hues = array<f32, 8>(
+            edit.hsl_hue_a.x, edit.hsl_hue_a.y, edit.hsl_hue_a.z, edit.hsl_hue_a.w,
+            edit.hsl_hue_b.x, edit.hsl_hue_b.y, edit.hsl_hue_b.z, edit.hsl_hue_b.w,
+        );
+        let sats = array<f32, 8>(
+            edit.hsl_sat_a.x, edit.hsl_sat_a.y, edit.hsl_sat_a.z, edit.hsl_sat_a.w,
+            edit.hsl_sat_b.x, edit.hsl_sat_b.y, edit.hsl_sat_b.z, edit.hsl_sat_b.w,
+        );
+        let lums = array<f32, 8>(
+            edit.hsl_lum_a.x, edit.hsl_lum_a.y, edit.hsl_lum_a.z, edit.hsl_lum_a.w,
+            edit.hsl_lum_b.x, edit.hsl_lum_b.y, edit.hsl_lum_b.z, edit.hsl_lum_b.w,
+        );
+
+        var hue_shift: f32 = 0.0;
+        var sat_scale: f32 = 0.0;
+        var lum_scale: f32 = 0.0;
+        let band_width = 45.0; // degrees half-band; beyond this the weight is 0
+
+        for (var i: u32 = 0u; i < 8u; i = i + 1u) {
+            // Smallest circular angular distance between pixel hue and band centre.
+            var d = abs(h_deg - centres[i]);
+            d = min(d, 360.0 - d);
+            // Linear tent weight: 1 at centre, 0 at band edge.
+            let w = max(0.0, 1.0 - d / band_width);
+            hue_shift = hue_shift + w * hues[i];
+            sat_scale = sat_scale + w * sats[i];
+            lum_scale = lum_scale + w * lums[i];
+        }
+
+        // Apply accumulated adjustments.
+        // Hue slider ±100 → ±36° rotation (0.36° per unit).
+        var hsv_out = hsv;
+        hsv_out.x = fract((h_deg + hue_shift * 0.36) / 360.0);
+        hsv_out.y = clamp(hsv_out.y * (1.0 + sat_scale / 100.0), 0.0, 1.0);
+        hsv_out.z = clamp(hsv_out.z * (1.0 + lum_scale / 100.0), 0.0, 1.0);
+        rgb = hsv_to_rgb(hsv_out);
+    }
 
     // 6. Vibrance — saturation boost weighted against already-saturated colours.
     let max_c = max(max(rgb.r, rgb.g), rgb.b);
