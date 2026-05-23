@@ -33,6 +33,19 @@ impl Catalog {
         }
         Ok(out)
     }
+
+    pub fn find_photo_by_hash(&self, hash: &[u8; 32]) -> Result<Option<Photo>, CatalogError> {
+        let read = self.db().begin_read()?;
+        let tbl = read.open_table(PHOTOS_TABLE)?;
+        for entry in tbl.iter()? {
+            let (_, v) = entry?;
+            let p: Photo = bincode::deserialize(v.value())?;
+            if p.file_hash == *hash {
+                return Ok(Some(p));
+            }
+        }
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -67,5 +80,17 @@ mod tests {
         cat.insert_photo(&p2).unwrap();
         let list = cat.list_photos().unwrap();
         assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn find_photo_by_hash_returns_inserted() {
+        let (_dir, cat) = cat();
+        let mut p = Photo::new(PathBuf::from("/x/a.jpg"), [0u8; 32], 1, 1, ImageFormat::Jpeg);
+        p.file_hash = [7u8; 32];
+        cat.insert_photo(&p).unwrap();
+        let found = cat.find_photo_by_hash(&[7u8; 32]).unwrap();
+        assert_eq!(found, Some(p));
+        let missing = cat.find_photo_by_hash(&[0u8; 32]).unwrap();
+        assert_eq!(missing, None);
     }
 }

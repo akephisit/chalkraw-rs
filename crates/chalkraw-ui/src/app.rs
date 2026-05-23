@@ -69,6 +69,39 @@ impl AppState {
         })
     }
 
+    /// Switch the current photo to one loaded from `path`. Flushes any pending
+    /// autosave on the previous photo first, then loads, hashes, and either looks
+    /// up an existing catalog row or inserts a new one.
+    pub fn switch_to_path(&mut self, path: PathBuf) -> anyhow::Result<()> {
+        // Make sure pending edits on the previous photo are committed BEFORE we
+        // swap photo_id; otherwise they'd auto-save under the wrong id.
+        self.dirty_since = Some(Instant::now() - DEBOUNCE);
+        self.flush_if_due();
+
+        let bytes = std::fs::read(&path)?;
+        let image = decode_image(&path)
+            .map_err(|e| anyhow::anyhow!("decode {path:?}: {e}"))?;
+        let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
+
+        let (photo, edit) = match self.catalog.find_photo_by_hash(&hash)? {
+            Some(p) => {
+                let e = self.catalog.get_edit(p.id)?;
+                (p, e)
+            }
+            None => {
+                let p = Photo::new(path.clone(), hash, image.width, image.height, ImageFormat::Jpeg);
+                self.catalog.insert_photo(&p)?;
+                (p, EditState::default())
+            }
+        };
+
+        self.image = image;
+        self.photo_id = photo.id;
+        self.edit = edit;
+        self.dirty_since = None;
+        Ok(())
+    }
+
     pub fn mark_dirty(&mut self) { self.dirty_since = Some(Instant::now()); }
 
     pub fn flush_if_due(&mut self) {
@@ -139,7 +172,22 @@ impl eframe::App for ChalkrawApp {
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Quit").clicked() { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close); }
+                    if ui.button("Open Photo…").clicked() {
+                        ui.close();
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff"])
+                            .pick_file()
+                        {
+                            if let Err(e) = self.state.switch_to_path(path) {
+                                log::warn!("open photo failed: {e}");
+                            } else {
+                                self.gpu = None; // force CanvasGpu rebuild on next ensure_gpu
+                            }
+                        }
+                    }
+                    if ui.button("Quit").clicked() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 });
                 ui.menu_button("Library", |ui| { ui.label("(Phase 3)"); });
                 ui.menu_button("Develop", |ui| { ui.label("(Phase 2)"); });

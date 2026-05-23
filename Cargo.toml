@@ -11,7 +11,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.6.0"
+version = "0.7.0"
 license = "MIT OR Apache-2.0"
 rust-version = "1.92"
 
@@ -48,6 +48,7 @@ pollster = "0.4"
 eframe = { version = "0.33", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
 egui = "0.33"
 egui-wgpu = "0.33"
+rfd = "0.15"
 
 # Concurrency
 rayon = "1"
