@@ -26,3 +26,6 @@ log = { workspace = true }
 uuid = { workspace = true }
 blake3 = { workspace = true }
 rfd = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

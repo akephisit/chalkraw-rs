@@ -67,7 +67,45 @@ pub fn left_panel(ui: &mut Ui, state: &mut crate::app::AppState) -> bool {
     ui.separator();
     ui.label("Folders");
     ui.indent("folders", |ui| {
-        ui.label("(empty until import — Phase 3)");
+        let folder_summary = match state.catalog.list_photos() {
+            Ok(photos) => {
+                let mut counts: std::collections::BTreeMap<std::path::PathBuf, usize> =
+                    std::collections::BTreeMap::new();
+                for p in &photos {
+                    if let Some(parent) = p.original_path.parent() {
+                        *counts.entry(parent.to_path_buf()).or_insert(0) += 1;
+                    }
+                }
+                counts
+            }
+            Err(_) => Default::default(),
+        };
+        if folder_summary.is_empty() {
+            ui.label("(no photos imported yet)");
+        } else {
+            let all_count: usize = folder_summary.values().sum();
+            if ui
+                .selectable_label(state.folder_filter.is_none(), format!("All ({all_count})"))
+                .clicked()
+            {
+                state.folder_filter = None;
+            }
+            let mut new_filter = state.folder_filter.clone();
+            for (folder, count) in &folder_summary {
+                let label = folder
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| folder.display().to_string());
+                let is_active = state.folder_filter.as_ref() == Some(folder);
+                if ui
+                    .selectable_label(is_active, format!("{label} ({count})"))
+                    .clicked()
+                {
+                    new_filter = Some(folder.clone());
+                }
+            }
+            state.folder_filter = new_filter;
+        }
     });
     ui.add_space(8.0);
     ui.label("Collections");

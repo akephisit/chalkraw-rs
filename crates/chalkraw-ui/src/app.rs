@@ -25,6 +25,7 @@ pub struct AppState {
     pub catalog: Catalog,
     pub dirty_since: Option<Instant>,
     pub new_preset_name: String,
+    pub folder_filter: Option<std::path::PathBuf>,
 }
 
 impl AppState {
@@ -73,6 +74,7 @@ impl AppState {
             catalog,
             dirty_since: None,
             new_preset_name: String::new(),
+            folder_filter: None,
         })
     }
 
@@ -563,6 +565,29 @@ fn draw_watermark_overlay(
     }
 }
 
+// ── Recursive directory walker ────────────────────────────────────────────────
+
+pub(crate) fn walk_dir(dir: &std::path::Path, extensions: &[&str], out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("cannot read {dir:?}: {e}");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_dir(&path, extensions, out);
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let ext_lc = ext.to_lowercase();
+            if extensions.iter().any(|e| *e == ext_lc) {
+                out.push(path);
+            }
+        }
+    }
+}
+
 impl eframe::App for ChalkrawApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.ensure_gpu(frame);
@@ -629,6 +654,20 @@ impl eframe::App for ChalkrawApp {
                             self.thumb_textures.clear();
                         }
                     }
+                    if ui.button("Import Folder…").clicked() {
+                        ui.close();
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            let extensions = ["jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef", "arw", "raf", "pef", "orf"];
+                            let mut paths = Vec::new();
+                            walk_dir(&dir, &extensions, &mut paths);
+                            log::info!("scanning {dir:?}: found {} candidates", paths.len());
+                            match self.state.import_files(&paths) {
+                                Ok(n) => log::info!("imported {n} new photos from folder"),
+                                Err(e) => log::warn!("folder import failed: {e}"),
+                            }
+                            self.thumb_textures.clear();
+                        }
+                    }
                     if ui.button("Batch Export…").clicked() {
                         ui.close();
                         self.export_dialog = Some(ExportDialogState::default());
@@ -662,15 +701,22 @@ impl eframe::App for ChalkrawApp {
         });
 
         egui::TopBottomPanel::bottom("filmstrip").default_height(120.0).show(ctx, |ui| {
-            let photos = match self.state.catalog.list_photos() {
+            let mut photos = match self.state.catalog.list_photos() {
                 Ok(p) => p,
                 Err(e) => {
                     ui.label(format!("filmstrip error: {e}"));
                     return;
                 }
             };
+            if let Some(filter) = &self.state.folder_filter {
+                photos.retain(|p| p.original_path.parent() == Some(filter.as_path()));
+            }
             if photos.is_empty() {
-                ui.label("No photos yet. File → Import Photos…");
+                if self.state.folder_filter.is_some() {
+                    ui.label("No photos in this folder.");
+                } else {
+                    ui.label("No photos yet. File → Import Photos / Import Folder…");
+                }
                 return;
             }
             let current_id = self.state.photo_id;
@@ -1381,5 +1427,25 @@ impl eframe::App for ChalkrawApp {
         if self.state.dirty_since.is_some() {
             ctx.request_repaint_after(DEBOUNCE + Duration::from_millis(20));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn walk_dir_finds_recursively_filtered_by_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.jpg"), b"x").unwrap();
+        std::fs::write(dir.path().join("b.png"), b"x").unwrap();
+        std::fs::write(dir.path().join("c.txt"), b"x").unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("d.cr2"), b"x").unwrap();
+        std::fs::write(sub.join("e.heic"), b"x").unwrap();
+        let mut out = Vec::new();
+        walk_dir(dir.path(), &["jpg", "png", "cr2"], &mut out);
+        assert_eq!(out.len(), 3);
     }
 }
