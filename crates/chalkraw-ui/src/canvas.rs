@@ -1,8 +1,8 @@
 use chalkraw_core::EditState;
 use chalkraw_io::LinearImage;
 use chalkraw_render::{
-    create_pingpong, BlurPipeline, DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice,
-    SourceTexture,
+    create_pingpong, BilateralPipeline, BlurPipeline, DevelopPipeline, EditUniforms,
+    PipelineConfig, RenderDevice, SourceTexture,
 };
 use egui::PaintCallbackInfo;
 use egui_wgpu::CallbackTrait;
@@ -21,6 +21,8 @@ pub struct CanvasGpu {
     pub source: SourceTexture,
     pub pipeline: DevelopPipeline,
     pub blur_pipeline: BlurPipeline,
+    /// Bilateral filter pipeline — edge-preserving NR (Phase 2E polish).
+    pub bilateral_pipeline: BilateralPipeline,
     /// Clarity blur ping-pong — large sigma (~16 px), used for Clarity local-contrast.
     #[allow(dead_code)]
     pub clarity_tex_a: ewgpu::Texture,
@@ -42,9 +44,10 @@ pub struct CanvasGpu {
     #[allow(dead_code)]
     pub texture_tex_b: ewgpu::Texture,
     pub texture_view_b: ewgpu::TextureView,
-    /// NR blur ping-pong — small fixed sigma (2 px), used for Noise Reduction (Phase 2E.4).
+    /// NR ping-pong — bilateral filter writes directly to nr_view_b (nr_view_a unused).
     #[allow(dead_code)]
     pub nr_tex_a: ewgpu::Texture,
+    #[allow(dead_code)]
     pub nr_view_a: ewgpu::TextureView,
     #[allow(dead_code)]
     pub nr_tex_b: ewgpu::Texture,
@@ -57,12 +60,14 @@ impl CanvasGpu {
         let source = SourceTexture::upload(rd, img.width, img.height, &img.pixels);
         let pipeline = DevelopPipeline::new(rd, PipelineConfig { output_format });
         let blur_pipeline = BlurPipeline::new(rd);
+        let bilateral_pipeline = BilateralPipeline::new(rd);
         let (clarity_tex_a, clarity_view_a, clarity_tex_b, clarity_view_b) =
             create_pingpong(rd, img.width, img.height);
         let (sharp_tex_a, sharp_view_a, sharp_tex_b, sharp_view_b) =
             create_pingpong(rd, img.width, img.height);
         let (texture_tex_a, texture_view_a, texture_tex_b, texture_view_b) =
             create_pingpong(rd, img.width, img.height);
+        // NR uses a single ping-pong texture; the bilateral filter writes to nr_view_b directly.
         let (nr_tex_a, nr_view_a, nr_tex_b, nr_view_b) =
             create_pingpong(rd, img.width, img.height);
         // Build the develop bind group pointing at the final blur result textures.
@@ -71,6 +76,7 @@ impl CanvasGpu {
             source,
             pipeline,
             blur_pipeline,
+            bilateral_pipeline,
             clarity_tex_a,
             clarity_view_a,
             clarity_tex_b,
@@ -90,18 +96,21 @@ impl CanvasGpu {
             bind_group,
         };
         // Run initial blurs at image-load time.
-        // Clarity uses sigma=16 px (large); Sharpening default radius=1.0 px (small);
-        // Texture uses sigma=5 px (mid-frequency); NR uses fixed sigma=2 px.
-        me.run_blurs(16.0, 1.0, 5.0, 2.0);
+        // Clarity sigma=16 px (large); Sharpening default radius=1.0 px (small);
+        // Texture sigma=5 px (mid-frequency); NR uses bilateral filter (nr_amount=0 → identity).
+        me.run_blurs(16.0, 1.0, 5.0, 0.0);
         me
     }
 
-    /// Run four two-pass separable Gaussian blurs.
+    /// Run Gaussian blurs for Clarity/Sharpening/Texture plus bilateral NR.
     /// Clarity:    source → clarity_view_a (H) → clarity_view_b (V).
     /// Sharpening: source → sharp_view_a   (H) → sharp_view_b   (V).
     /// Texture:    source → texture_view_a (H) → texture_view_b (V).
-    /// NR:         source → nr_view_a      (H) → nr_view_b      (V).
-    pub fn run_blurs(&self, clarity_sigma: f32, sharp_sigma: f32, texture_sigma: f32, nr_sigma: f32) {
+    /// NR:         source → nr_view_b (single bilateral pass; nr_view_a unused).
+    ///
+    /// `nr_amount` is 0..100 (average of luminance and color NR sliders).
+    /// Maps to sigma_range: 0.01 (tight/edge-preserving) .. 0.21 (looser) at 100.
+    pub fn run_blurs(&self, clarity_sigma: f32, sharp_sigma: f32, texture_sigma: f32, nr_amount: f32) {
         // Clarity blur (large sigma).
         self.blur_pipeline.render_pass(
             &self.source.view,
@@ -153,22 +162,17 @@ impl CanvasGpu {
             false,
             texture_sigma,
         );
-        // NR blur (small fixed sigma=2px).
-        self.blur_pipeline.render_pass(
+        // NR: single bilateral filter pass. sigma_range scales with the NR amount slider:
+        // nr_amount=0 → sigma_range=0.01 (very tight: almost no smoothing across any edge);
+        // nr_amount=100 → sigma_range=0.21 (looser: more smoothing of subtle edges).
+        // sigma_spatial=2.0 px is fixed (controls the spatial reach of the kernel).
+        let sigma_range = 0.01 + (nr_amount / 100.0) * 0.2;
+        self.bilateral_pipeline.render_pass(
             &self.source.view,
-            &self.nr_view_a,
-            self.source.width,
-            self.source.height,
-            true,
-            nr_sigma,
-        );
-        self.blur_pipeline.render_pass(
-            &self.nr_view_a,
             &self.nr_view_b,
-            self.source.width,
-            self.source.height,
-            false,
-            nr_sigma,
+            2.0,
+            sigma_range,
+            3.0,
         );
     }
 

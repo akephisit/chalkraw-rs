@@ -5,8 +5,8 @@
 /// skip gracefully when no GPU adapter is available (CI / sandbox).
 use chalkraw_core::{Crop, EditState};
 use chalkraw_render::{
-    create_pingpong, make_target, read_to_cpu, BlurPipeline, DevelopPipeline, EditUniforms,
-    PipelineConfig, RenderDevice, SourceTexture,
+    create_pingpong, make_target, read_to_cpu, BilateralPipeline, BlurPipeline, DevelopPipeline,
+    EditUniforms, PipelineConfig, RenderDevice, SourceTexture,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -864,4 +864,61 @@ fn dehaze_positive_increases_contrast_on_hazy_pattern() {
     let on_right = on[((16 * w + 24) * 4) as usize];
     let span_on = (on_right as i32 - on_left as i32).abs();
     assert!(span_on > span_off, "dehaze should widen the contrast span: off={span_off} on={span_on}");
+}
+
+// ── Phase 2E polish: Bilateral NR ─────────────────────────────────────────────
+
+/// Smoke test: verify the BilateralPipeline compiles and runs without panicking.
+/// A full bilateral-vs-Gaussian comparison would require Rgba16Float readback
+/// which is not yet supported; this test confirms pipeline creation + render pass
+/// completes on a sharp-edge source without crashing.
+#[test]
+fn bilateral_pipeline_smoke_test() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skip: no GPU"); return; }
+    };
+    let w: u32 = 32;
+    let h: u32 = 32;
+    // Sharp-edge source: left half dark, right half bright.
+    let pixels: Vec<f32> = (0..w * h).flat_map(|i: u32| {
+        let x = i % w;
+        let v = if x < w / 2 { 0.2_f32 } else { 0.8_f32 };
+        [v, v, v, 1.0_f32]
+    }).collect();
+
+    let source = SourceTexture::upload(&rd, w, h, &pixels);
+    let blur   = BlurPipeline::new(&rd);
+    let bilat  = BilateralPipeline::new(&rd);
+
+    // Allocate ping-pong textures for clarity, sharp, texture, and bilateral output.
+    let (_, c_a, _, c_b) = create_pingpong(&rd, w, h);
+    let (_, s_a, _, s_b) = create_pingpong(&rd, w, h);
+    let (_, t_a, _, t_b) = create_pingpong(&rd, w, h);
+    let (_, _nr_a, _, nr_b) = create_pingpong(&rd, w, h);
+
+    blur.render_pass(&source.view, &c_a, w, h, true,  16.0);
+    blur.render_pass(&c_a, &c_b, w, h, false, 16.0);
+    blur.render_pass(&source.view, &s_a, w, h, true,  1.5);
+    blur.render_pass(&s_a, &s_b, w, h, false, 1.5);
+    blur.render_pass(&source.view, &t_a, w, h, true,  5.0);
+    blur.render_pass(&t_a, &t_b, w, h, false, 5.0);
+
+    // Bilateral filter: sigma_spatial=2px, sigma_range=0.1 (moderate edge-preservation), 7×7 window.
+    bilat.render_pass(&source.view, &nr_b, 2.0, 0.1, 3.0);
+
+    // Build the develop pipeline and verify it can render using the bilateral output.
+    let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
+    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b, &nr_b);
+
+    let mut edit = EditState::default();
+    edit.detail.noise_reduction.luminance = 80.0;
+    edit.detail.noise_reduction.color     = 60.0;
+    pipe.update_uniforms(&EditUniforms::from(&edit));
+
+    let (tex, view) = make_target(&rd, w, h);
+    pipe.render(&view, &bind);
+    // If we reach here without panic the bilateral pipeline is functioning.
+    let pixels_out = read_to_cpu(&rd, &tex, w, h).unwrap();
+    assert_eq!(pixels_out.len(), (w * h * 4) as usize, "output buffer should have w*h*4 bytes");
 }

@@ -71,7 +71,11 @@ use chalkraw_core::EditState;
 /// Phase 2E.5 (Dehaze): 1 × f32 + 3-float pad = 16 bytes.
 /// 400  dehaze            f32
 /// 404  _pad_dehaze       [f32;3]
-/// Total: 416 bytes
+/// Phase 2E polish (Sharpening Detail + Masking): 2 × f32 + 2-float pad = 16 bytes.
+/// 416  sharpening_detail   f32
+/// 420  sharpening_masking  f32
+/// 424  _pad_sharp_dm       [f32;2]
+/// Total: 432 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct EditUniforms {
@@ -140,10 +144,13 @@ pub struct EditUniforms {
     pub nr_luminance: f32,          // offset 384  0..100 — strength of luminance smoothing mix
     pub nr_color: f32,              // offset 388  0..100 — strength of chroma smoothing mix
     pub _pad_nr: [f32; 2],          // offset 392  → pads to 400
-    // Phase 2E.5: Dehaze (simplified — reuses clarity_blur as low-freq reference).
-    // Not a physically-correct dark-channel-prior dehaze; visually plausible approx.
+    // Phase 2E.5: Dehaze (DCP approximation).
     pub dehaze: f32,                // offset 400  -100..100 (positive=remove haze, negative=add)
     pub _pad_dehaze: [f32; 3],      // offset 404  → pads to 416
+    // Phase 2E polish: Sharpening Detail + Masking (2 × f32 + 2-float pad = 16 bytes).
+    pub sharpening_detail: f32,     // offset 416  0..100
+    pub sharpening_masking: f32,    // offset 420  0..100
+    pub _pad_sharp_dm: [f32; 2],    // offset 424  → pads to 432
 }
 
 impl From<&EditState> for EditUniforms {
@@ -222,6 +229,10 @@ impl From<&EditState> for EditUniforms {
             // Phase 2E.5: Dehaze.
             dehaze: e.presence.dehaze,
             _pad_dehaze: [0.0; 3],
+            // Phase 2E polish: Sharpening Detail + Masking.
+            sharpening_detail: e.detail.sharpening.detail,
+            sharpening_masking: e.detail.sharpening.masking,
+            _pad_sharp_dm: [0.0; 2],
         }
     }
 }
@@ -232,7 +243,7 @@ mod tests {
 
     #[test]
     fn edit_uniforms_size_matches_wgsl() {
-        // Must be 416 bytes to match the WGSL EditUniforms struct layout.
+        // Must be 432 bytes to match the WGSL EditUniforms struct layout.
         // Phase 2A: 128 bytes. Phase 2B adds 6 × vec4<f32> = 96 bytes → 224.
         // Phase 2C adds 4 × vec4<f32> = 64 bytes → 288.
         // Phase 2D adds 1 × vec4<f32> = 16 bytes → 304.
@@ -241,10 +252,11 @@ mod tests {
         // Phase 2E.2 adds sharpening_amount + sharpening_radius + 2-f32 pad = 16 bytes → 384.
         // Phase 2E.4 adds nr_luminance + nr_color + 2-f32 pad = 16 bytes → 400.
         // Phase 2E.5 adds dehaze + 3-f32 pad = 16 bytes → 416.
+        // Phase 2E polish adds sharpening_detail + sharpening_masking + 2-f32 pad = 16 bytes → 432.
         // If this fails, check that the Rust and WGSL fields are in sync.
         assert_eq!(
             std::mem::size_of::<EditUniforms>(),
-            416,
+            432,
             "EditUniforms size mismatch — Rust and WGSL structs are out of sync"
         );
     }

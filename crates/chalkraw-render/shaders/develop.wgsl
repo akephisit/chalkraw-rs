@@ -1,10 +1,10 @@
-// chalkraw-rs develop shader — Phase 2E.5: Dehaze (simplified, reuses clarity blur).
+// chalkraw-rs develop shader — Phase 2E polish: bilateral NR, sharp detail/masking, DCP dehaze.
 // Operations are applied in Lightroom order: WB → Exposure → Contrast →
 // Highlights/Shadows/Whites/Blacks → Saturation → HSL → Color Grading →
 // Parametric Curve → Clarity → Sharpening → Vibrance → Vignette → Grain.
 //
 // The WGSL struct layout must stay byte-for-byte in sync with EditUniforms in
-// uniforms.rs (total 384 bytes). WGSL alignment rules:
+// uniforms.rs (total 432 bytes). WGSL alignment rules:
 //   vec4<f32> → align 16, size 16
 //   vec3<f32> → align 16, size 12
 //   vec2<f32> → align  8, size  8
@@ -74,7 +74,11 @@
 // 392   _pad_nr            vec2<f32>
 // Phase 2E.5 (Dehaze): 1 × vec4<f32> = 16 bytes.
 // 400   dehaze_pad         vec4<f32>   .x = dehaze (-100..100), .yzw = padding
-// Total: 416 bytes.
+// Phase 2E polish (Sharpening Detail + Masking): 2 × f32 + vec2<f32> pad = 16 bytes.
+// 416   sharpening_detail  f32         0..100
+// 420   sharpening_masking f32         0..100
+// 424   _pad_sharp_dm      vec2<f32>
+// Total: 432 bytes.
 
 struct EditUniforms {
     exposure:           f32,
@@ -139,11 +143,13 @@ struct EditUniforms {
     nr_color:           f32,
     _pad_nr:            vec2<f32>,
     // Phase 2E.5: Dehaze (offset 400..416).
-    // Simplified approximation — not a dark-channel-prior dehaze.
-    // Reuses clarity_blur_tex as the low-frequency "atmospheric" reference.
-    // Packed as vec4<f32> so the WGSL struct size matches the Rust layout:
+    // Dark-channel-prior approximation. Packed as vec4<f32> to match Rust layout.
     // .x = dehaze (-100..100), .yzw = padding.
     dehaze_pad:         vec4<f32>,
+    // Phase 2E polish: Sharpening Detail + Masking (offset 416..432).
+    sharpening_detail:  f32,        // 0..100
+    sharpening_masking: f32,        // 0..100
+    _pad_sharp_dm:      vec2<f32>,
 };
 
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
@@ -421,27 +427,39 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         rgb = rgb + local_contrast * (edit.clarity / 100.0 * 0.5);
     }
 
-    // 6c2. Dehaze — simplified approximation (NOT a dark-channel-prior dehaze).
-    //      Reuses clarity_blur_tex (sigma=16px) as the low-frequency "atmospheric"
-    //      reference. Contrast boost is biased toward darker (presumed-hazier) regions
-    //      via (1.5 - lum*1.5), and a matching saturation lift restores colour that
-    //      haze desaturates.
-    //
-    //      Limitation: no atmospheric-light estimation, no depth map, no spatial
-    //      non-uniformity. A proper dark-channel-prior pass can replace this in a
-    //      future polish phase.
+    // 6c2. Dehaze — dark-channel-prior approximation (Phase 2E polish).
+    //      Uses a 3×3 local dark channel (min(R,G,B) over neighbourhood), assumes a
+    //      white atmospheric light, and recovers the scene via the transmission map.
+    //      This is still a single-pass approximation (no per-image atmospheric-light
+    //      pre-pass) but is closer to the DCP technique than the v0.15.3 clarity-style
+    //      approach. For negative strength the old flatten fall-back is retained.
     {
         let dehaze_strength = edit.dehaze_pad.x / 100.0;  // -1..1
-        let dehaze_lum = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-        // Bias: ~1.5 at black, ~0.75 at mid-grey, 0 at white — dark/hazy areas get more correction.
-        let dehaze_bias = clamp(1.5 - dehaze_lum * 1.5, 0.0, 1.5);
-        let dehaze_blur = textureSample(clarity_blur_tex, source_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0))).rgb;
-        let dehaze_detail = rgb - dehaze_blur;
-        rgb = rgb + dehaze_detail * dehaze_strength * dehaze_bias * 1.5;
+        // Local dark channel from a 3×3 sample neighbourhood.
+        let dims_dh = vec2<f32>(textureDimensions(source_tex, 0));
+        let texel_dh = vec2<f32>(1.0 / dims_dh.x, 1.0 / dims_dh.y);
+        var dark = 1.0;
+        for (var dy2 = -1; dy2 <= 1; dy2 = dy2 + 1) {
+            for (var dx2 = -1; dx2 <= 1; dx2 = dx2 + 1) {
+                let s = textureSample(source_tex, source_sampler, clamp(uv + vec2<f32>(f32(dx2) * texel_dh.x, f32(dy2) * texel_dh.y), vec2<f32>(0.0), vec2<f32>(1.0))).rgb;
+                dark = min(dark, min(s.r, min(s.g, s.b)));
+            }
+        }
+        // Atmospheric light assumed white (0.95, 0.95, 0.95) — true DCP would pick the
+        // brightest dark-channel pixel over the whole image (requires a pre-pass).
+        let atmos = vec3<f32>(0.95);
+        let omega = 0.85;
+        let t_min = 0.1;
+        let t = max(1.0 - omega * dark, t_min);
+        let dehazed = (rgb - atmos) / t + atmos;
 
-        // Saturation lift — restores colour washed out by haze.
-        let dehaze_gray = vec3<f32>(dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722)));
-        rgb = mix(dehaze_gray, rgb, 1.0 + dehaze_strength * dehaze_bias * 0.5);
+        if (dehaze_strength >= 0.0) {
+            rgb = mix(rgb, dehazed, dehaze_strength);
+        } else {
+            // Negative strength: flatten toward grey (add haze).
+            let gray_dh = vec3<f32>(dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722)));
+            rgb = mix(rgb, gray_dh, -dehaze_strength * 0.5);
+        }
     }
 
     // 6d. Texture — mid-frequency local-contrast (smaller sigma than Clarity).
@@ -453,13 +471,36 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         rgb = rgb + texture_detail * (edit.texture / 100.0 * 0.5);
     }
 
-    // 6e. Sharpening — unsharp mask using the small-sigma pre-blurred source.
-    //     output = original + (original - blurred_small) × (amount / 150)
-    //     amount slider 0..150; dividing by 150 maps max amount to ~1.0 boost.
+    // 6e. Sharpening — unsharp mask with Detail and Masking modulation (Phase 2E polish).
+    //     Detail blends between small-sigma (radius-based) and large-sigma (clarity-blur) detail.
+    //     Masking gates sharpening by luminance-gradient edge strength — flat areas
+    //     (skin, sky) get less sharpening when masking > 0; sharp edges get full sharpening.
     {
         let sharp_blurred = textureSample(sharp_blur_tex, source_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0))).rgb;
-        let detail = rgb - sharp_blurred;
-        rgb = rgb + detail * (edit.sharpening_amount / 150.0);
+        let unsharp = rgb - sharp_blurred;
+
+        // Detail: blend between pure unsharp and high-frequency component relative to clarity blur.
+        let detail_w = edit.sharpening_detail / 100.0;
+        let clarity_blurred_for_sharp = textureSample(clarity_blur_tex, source_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0))).rgb;
+        let full_detail = rgb - clarity_blurred_for_sharp;
+        // At detail=0: use unsharp only. At detail=100: blend in 30% full-freq contribution.
+        let mixed_detail = mix(unsharp, full_detail, detail_w * 0.3);
+
+        // Masking: luminance gradient via central differences. Sharpening is gated
+        // by edge strength so smooth regions receive less boost.
+        let dims_sharp = vec2<f32>(textureDimensions(source_tex, 0));
+        let texel_sharp = vec2<f32>(1.0 / dims_sharp.x, 1.0 / dims_sharp.y);
+        let lum_n = dot(textureSample(source_tex, source_sampler, uv + vec2<f32>(0.0, -texel_sharp.y)).rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let lum_s = dot(textureSample(source_tex, source_sampler, uv + vec2<f32>(0.0,  texel_sharp.y)).rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let lum_e = dot(textureSample(source_tex, source_sampler, uv + vec2<f32>( texel_sharp.x, 0.0)).rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let lum_w = dot(textureSample(source_tex, source_sampler, uv + vec2<f32>(-texel_sharp.x, 0.0)).rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let grad = abs(lum_e - lum_w) + abs(lum_s - lum_n);
+        // mask_threshold=0 (masking=0) → smoothstep always → 1 (full sharpening everywhere).
+        // mask_threshold>0 → pixels below the threshold are smoothstepped toward 0 (less sharpening).
+        let mask_threshold = edit.sharpening_masking / 100.0 * 0.5;
+        let mask = smoothstep(0.0, mask_threshold + 0.001, grad);
+
+        rgb = rgb + mixed_detail * (edit.sharpening_amount / 150.0) * mask;
     }
 
     // 7. Vibrance — saturation boost weighted against already-saturated colours.

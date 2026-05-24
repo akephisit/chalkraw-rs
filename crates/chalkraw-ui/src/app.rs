@@ -734,10 +734,11 @@ impl eframe::App for ChalkrawApp {
             if let Some(gpu) = self.gpu.as_ref() {
                 if edit_changed {
                     gpu.update(&self.state.edit);
-                    // Re-run all four blurs on every edit change. Clarity uses a fixed
-                    // sigma=16; Sharpening uses the radius slider as sigma; Texture
-                    // uses a fixed sigma=5; NR uses a fixed sigma=2.
-                    gpu.run_blurs(16.0, self.state.edit.detail.sharpening.radius, 5.0, 2.0);
+                    // Re-run blurs on every edit change. Clarity=σ16, Sharpening=radius slider,
+                    // Texture=σ5, NR=bilateral (nr_amount = average of luminance and color sliders).
+                    let nr_amount = (self.state.edit.detail.noise_reduction.luminance
+                        + self.state.edit.detail.noise_reduction.color) / 2.0;
+                    gpu.run_blurs(16.0, self.state.edit.detail.sharpening.radius, 5.0, nr_amount);
                     self.state.mark_dirty();
                 }
                 // Issue 2: letterbox — preserve image aspect ratio rather than

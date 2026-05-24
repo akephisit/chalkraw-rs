@@ -327,10 +327,10 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
             ui.label("Radius");
             if slider_scroll_suffix(ui, &mut edit.detail.sharpening.radius, 0.5..=3.0, 1, " px") { changed = true; }
             ui.add_space(4.0);
-            ui.label("Detail (Phase 2E.2 polish)");
-            ui.add_enabled(false, egui::Slider::new(&mut edit.detail.sharpening.detail, 0.0..=100.0));
-            ui.label("Masking (Phase 2E.2 polish)");
-            ui.add_enabled(false, egui::Slider::new(&mut edit.detail.sharpening.masking, 0.0..=100.0));
+            ui.label("Detail");
+            if slider_scroll(ui, &mut edit.detail.sharpening.detail, 0.0..=100.0, 0) { changed = true; }
+            ui.label("Masking");
+            if slider_scroll(ui, &mut edit.detail.sharpening.masking, 0.0..=100.0, 0) { changed = true; }
             ui.add_space(4.0);
             ui.strong("Noise Reduction");
             ui.label("Noise Reduction Luminance");
