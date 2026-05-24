@@ -11,7 +11,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.16.0"
+version = "0.16.1"
 license = "MIT OR Apache-2.0"
 rust-version = "1.92"
 
@@ -30,6 +30,9 @@ bincode = "1"
 uuid = { version = "1", features = ["v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 blake3 = "1"
+
+# Text rasterisation
+ab_glyph = "0.2"
 
 # IO / images
 image = "0.25"

@@ -1,5 +1,7 @@
 //! Export pipeline: single-photo and batch export with optional PNG watermark.
 
+pub mod text;
+
 use chalkraw_core::EditState;
 use chalkraw_io::LinearImage;
 use chalkraw_render::{
@@ -259,8 +261,8 @@ fn export_single_item(
 }
 
 /// Composite each layer of a `WatermarkPreset` onto `base_rgba` in order.
-/// Rotation is in the data model but not applied in Phase 5A — layers are
-/// composited at `rotation_deg = 0`. Phase 5 polish will add rotation.
+/// Rotation is in the data model but not applied (same compromise as Phase 5A
+/// for image layers). Phase 5 polish will add rotation support.
 pub fn apply_watermark_preset(
     base_rgba: &mut [u8],
     base_w: u32,
@@ -278,6 +280,76 @@ pub fn apply_watermark_preset(
                     margin_pct: img_layer.margin_pct,
                 };
                 apply_watermark(base_rgba, base_w, base_h, &stamp)?;
+            }
+            chalkraw_core::WatermarkLayer::Text(text_layer) => {
+                apply_text_layer(base_rgba, base_w, base_h, text_layer)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_text_layer(
+    base_rgba: &mut [u8],
+    base_w: u32,
+    base_h: u32,
+    layer: &chalkraw_core::TextLayer,
+) -> Result<(), ExportError> {
+    let long_edge = base_w.max(base_h) as f32;
+    let px_size = (layer.font_size_pct / 100.0 * long_edge).max(8.0);
+    let color = [layer.color.r, layer.color.g, layer.color.b, layer.color.a];
+    let text_img = match crate::text::rasterise_text(&layer.text, px_size, color) {
+        Some(img) => img,
+        None => return Ok(()), // empty text or font failure — silently skip
+    };
+    let (new_w, new_h) = text_img.dimensions();
+    let margin = (layer.margin_pct / 100.0 * long_edge).round() as i64;
+    let (anchor_x, anchor_y) = match layer.anchor {
+        chalkraw_core::WatermarkAnchor::TopLeft => (margin, margin),
+        chalkraw_core::WatermarkAnchor::TopCenter => {
+            ((base_w as i64 - new_w as i64) / 2, margin)
+        }
+        chalkraw_core::WatermarkAnchor::TopRight => {
+            (base_w as i64 - new_w as i64 - margin, margin)
+        }
+        chalkraw_core::WatermarkAnchor::CenterLeft => {
+            (margin, (base_h as i64 - new_h as i64) / 2)
+        }
+        chalkraw_core::WatermarkAnchor::Center => {
+            ((base_w as i64 - new_w as i64) / 2, (base_h as i64 - new_h as i64) / 2)
+        }
+        chalkraw_core::WatermarkAnchor::CenterRight => {
+            (base_w as i64 - new_w as i64 - margin, (base_h as i64 - new_h as i64) / 2)
+        }
+        chalkraw_core::WatermarkAnchor::BottomLeft => {
+            (margin, base_h as i64 - new_h as i64 - margin)
+        }
+        chalkraw_core::WatermarkAnchor::BottomCenter => {
+            ((base_w as i64 - new_w as i64) / 2, base_h as i64 - new_h as i64 - margin)
+        }
+        chalkraw_core::WatermarkAnchor::BottomRight => {
+            (base_w as i64 - new_w as i64 - margin, base_h as i64 - new_h as i64 - margin)
+        }
+    };
+    let global_alpha = layer.opacity.clamp(0.0, 1.0);
+    for wy in 0..new_h {
+        for wx in 0..new_w {
+            let bx = anchor_x + wx as i64;
+            let by = anchor_y + wy as i64;
+            if bx < 0 || by < 0 || bx >= base_w as i64 || by >= base_h as i64 {
+                continue;
+            }
+            let text_px = text_img.get_pixel(wx, wy);
+            let a = (text_px[3] as f32 / 255.0) * global_alpha;
+            if a <= 0.0 {
+                continue;
+            }
+            let base_idx = ((by as u32 * base_w + bx as u32) * 4) as usize;
+            for c in 0..3 {
+                let dst = base_rgba[base_idx + c] as f32;
+                let src = text_px[c] as f32;
+                base_rgba[base_idx + c] =
+                    (dst * (1.0 - a) + src * a).round().clamp(0.0, 255.0) as u8;
             }
         }
     }

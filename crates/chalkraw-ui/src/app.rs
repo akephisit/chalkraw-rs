@@ -1014,78 +1014,170 @@ impl eframe::App for ChalkrawApp {
                         }
                     }
 
+                    fn text_color_to_egui(c: chalkraw_core::TextColor) -> egui::Color32 {
+                        egui::Color32::from_rgba_unmultiplied(c.r, c.g, c.b, c.a)
+                    }
+                    fn egui_to_text_color(c: egui::Color32) -> chalkraw_core::TextColor {
+                        let arr = c.to_array();
+                        chalkraw_core::TextColor { r: arr[0], g: arr[1], b: arr[2], a: arr[3] }
+                    }
+
                     for (idx, layer) in editor.current.layers.iter_mut().enumerate() {
-                        let chalkraw_core::WatermarkLayer::Image(ref mut img) = layer;
-                        let header_text = format!(
-                            "Image: {}  [{}]  {}%  {}%",
-                            img.png_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "(unset)".into()),
-                            anchor_labels[anchor_to_idx(img.anchor)],
-                            img.size_pct as u32,
-                            (img.opacity * 100.0) as u32,
-                        );
                         let is_expanded = editor.expanded_layer == Some(idx);
-                        if egui::CollapsingHeader::new(header_text)
-                            .id_salt(format!("wm_layer_{idx}"))
-                            .open(if is_expanded { Some(true) } else { None })
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label("PNG:");
-                                    if ui.button("Browse…").clicked() {
-                                        if let Some(p) = rfd::FileDialog::new()
-                                            .add_filter("PNG", &["png"])
-                                            .pick_file()
-                                        {
-                                            img.png_path = p;
+                        match layer {
+                            chalkraw_core::WatermarkLayer::Image(ref mut img) => {
+                                let header_text = format!(
+                                    "Image: {}  [{}]  {}%  {}%",
+                                    img.png_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "(unset)".into()),
+                                    anchor_labels[anchor_to_idx(img.anchor)],
+                                    img.size_pct as u32,
+                                    (img.opacity * 100.0) as u32,
+                                );
+                                if egui::CollapsingHeader::new(header_text)
+                                    .id_salt(format!("wm_layer_{idx}"))
+                                    .open(if is_expanded { Some(true) } else { None })
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label("PNG:");
+                                            if ui.button("Browse…").clicked() {
+                                                if let Some(p) = rfd::FileDialog::new()
+                                                    .add_filter("PNG", &["png"])
+                                                    .pick_file()
+                                                {
+                                                    img.png_path = p;
+                                                }
+                                            }
+                                        });
+                                        let path_str = img.png_path.display().to_string();
+                                        if path_str.is_empty() {
+                                            ui.colored_label(egui::Color32::YELLOW, "(no PNG selected)");
+                                        } else {
+                                            ui.label(&path_str);
                                         }
-                                    }
-                                });
-                                let path_str = img.png_path.display().to_string();
-                                if path_str.is_empty() {
-                                    ui.colored_label(egui::Color32::YELLOW, "(no PNG selected)");
-                                } else {
-                                    ui.label(&path_str);
-                                }
-                                ui.add_space(4.0);
-                                ui.label("Anchor:");
-                                let mut anchor_idx = anchor_to_idx(img.anchor);
-                                egui::Grid::new(format!("wm_anchor_{idx}")).num_columns(3).show(ui, |ui| {
-                                    for (i, label) in anchor_labels.iter().enumerate() {
-                                        let selected = anchor_idx == i;
-                                        if ui.add(egui::Button::new(*label).selected(selected)).clicked() {
-                                            anchor_idx = i;
+                                        ui.add_space(4.0);
+                                        ui.label("Anchor:");
+                                        let mut anchor_idx = anchor_to_idx(img.anchor);
+                                        egui::Grid::new(format!("wm_anchor_{idx}")).num_columns(3).show(ui, |ui| {
+                                            for (i, label) in anchor_labels.iter().enumerate() {
+                                                let selected = anchor_idx == i;
+                                                if ui.add(egui::Button::new(*label).selected(selected)).clicked() {
+                                                    anchor_idx = i;
+                                                }
+                                                if i % 3 == 2 { ui.end_row(); }
+                                            }
+                                        });
+                                        img.anchor = idx_to_anchor(anchor_idx);
+                                        ui.horizontal(|ui| {
+                                            ui.label("Size (% long edge):");
+                                            ui.add(egui::Slider::new(&mut img.size_pct, 1.0..=50.0).fixed_decimals(0));
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Opacity (%):");
+                                            let mut op_pct = img.opacity * 100.0;
+                                            ui.add(egui::Slider::new(&mut op_pct, 0.0..=100.0).fixed_decimals(0));
+                                            img.opacity = op_pct / 100.0;
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Margin (% long edge):");
+                                            ui.add(egui::Slider::new(&mut img.margin_pct, 0.0..=20.0).fixed_decimals(0));
+                                        });
+                                        if ui.button("Remove layer").clicked() {
+                                            remove_layer = Some(idx);
                                         }
-                                        if i % 3 == 2 { ui.end_row(); }
-                                    }
-                                });
-                                img.anchor = idx_to_anchor(anchor_idx);
-                                ui.horizontal(|ui| {
-                                    ui.label("Size (% long edge):");
-                                    ui.add(egui::Slider::new(&mut img.size_pct, 1.0..=50.0).fixed_decimals(0));
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.label("Opacity (%):");
-                                    let mut op_pct = img.opacity * 100.0;
-                                    ui.add(egui::Slider::new(&mut op_pct, 0.0..=100.0).fixed_decimals(0));
-                                    img.opacity = op_pct / 100.0;
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.label("Margin (% long edge):");
-                                    ui.add(egui::Slider::new(&mut img.margin_pct, 0.0..=20.0).fixed_decimals(0));
-                                });
-                                if ui.button("Remove layer").clicked() {
-                                    remove_layer = Some(idx);
+                                    })
+                                    .header_response
+                                    .clicked()
+                                {
+                                    editor.expanded_layer = if is_expanded { None } else { Some(idx) };
                                 }
-                            })
-                            .header_response
-                            .clicked()
-                        {
-                            editor.expanded_layer = if is_expanded { None } else { Some(idx) };
+                            }
+                            chalkraw_core::WatermarkLayer::Text(ref mut txt) => {
+                                let header_text = format!(
+                                    "Text: \"{}\"  [{}]  {:.1}%  {}%",
+                                    if txt.text.len() > 20 { &txt.text[..20] } else { &txt.text },
+                                    anchor_labels[anchor_to_idx(txt.anchor)],
+                                    txt.font_size_pct,
+                                    (txt.opacity * 100.0) as u32,
+                                );
+                                if egui::CollapsingHeader::new(header_text)
+                                    .id_salt(format!("wm_text_layer_{idx}"))
+                                    .open(if is_expanded { Some(true) } else { None })
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label("Text:");
+                                            ui.add(
+                                                egui::TextEdit::singleline(&mut txt.text)
+                                                    .desired_width(200.0),
+                                            );
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Font size (% long edge):");
+                                            ui.add(
+                                                egui::Slider::new(&mut txt.font_size_pct, 0.5..=10.0)
+                                                    .fixed_decimals(1),
+                                            );
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Colour:");
+                                            let mut col = text_color_to_egui(txt.color);
+                                            if egui::color_picker::color_edit_button_srgba(
+                                                ui,
+                                                &mut col,
+                                                egui::color_picker::Alpha::OnlyBlend,
+                                            )
+                                            .changed()
+                                            {
+                                                txt.color = egui_to_text_color(col);
+                                            }
+                                        });
+                                        ui.add_space(4.0);
+                                        ui.label("Anchor:");
+                                        let mut anchor_idx = anchor_to_idx(txt.anchor);
+                                        egui::Grid::new(format!("wm_text_anchor_{idx}")).num_columns(3).show(ui, |ui| {
+                                            for (i, label) in anchor_labels.iter().enumerate() {
+                                                let selected = anchor_idx == i;
+                                                if ui.add(egui::Button::new(*label).selected(selected)).clicked() {
+                                                    anchor_idx = i;
+                                                }
+                                                if i % 3 == 2 { ui.end_row(); }
+                                            }
+                                        });
+                                        txt.anchor = idx_to_anchor(anchor_idx);
+                                        ui.horizontal(|ui| {
+                                            ui.label("Opacity (%):");
+                                            let mut op_pct = txt.opacity * 100.0;
+                                            ui.add(egui::Slider::new(&mut op_pct, 0.0..=100.0).fixed_decimals(0));
+                                            txt.opacity = op_pct / 100.0;
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Margin (% long edge):");
+                                            ui.add(egui::Slider::new(&mut txt.margin_pct, 0.0..=20.0).fixed_decimals(0));
+                                        });
+                                        if ui.button("Remove layer").clicked() {
+                                            remove_layer = Some(idx);
+                                        }
+                                    })
+                                    .header_response
+                                    .clicked()
+                                {
+                                    editor.expanded_layer = if is_expanded { None } else { Some(idx) };
+                                }
+                            }
                         }
                     }
 
-                    if ui.button("+ Add Image Layer").clicked() {
-                        add_layer = true;
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("+ Add Image Layer").clicked() {
+                            add_layer = true;
+                        }
+                        if ui.button("+ Add Text Layer").clicked() {
+                            let new_idx = editor.current.layers.len();
+                            editor.current.layers.push(chalkraw_core::WatermarkLayer::Text(
+                                chalkraw_core::TextLayer::default(),
+                            ));
+                            editor.expanded_layer = Some(new_idx);
+                        }
+                    });
 
                     ui.separator();
                     ui.horizontal(|ui| {

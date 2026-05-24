@@ -7,7 +7,7 @@ use chalkraw_render::RenderDevice;
 use std::path::PathBuf;
 
 #[allow(unused_imports)]
-use chalkraw_core::{ImageLayer, WatermarkLayer, WatermarkPreset};
+use chalkraw_core::{ImageLayer, TextLayer, TextColor, WatermarkLayer, WatermarkPreset};
 
 fn fixture_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -90,6 +90,46 @@ fn export_batch_with_watermark_completes() {
             margin_pct: 5.0,
         }),
         watermark_preset: None,
+    };
+    let results = export_batch(&rd, &items, &opts, |_, _, _| {});
+    assert_eq!(results.len(), 1);
+    assert!(results[0].error.is_none(), "error: {:?}", results[0].error);
+    assert!(results[0].output_path.as_ref().unwrap().exists());
+}
+
+#[test]
+fn export_with_text_layer_completes() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => {
+            eprintln!("skip: no GPU");
+            return;
+        }
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut preset = WatermarkPreset::new("text-test".into());
+    preset.layers.push(WatermarkLayer::Text(TextLayer {
+        text: "© chalkraw".into(),
+        font_size_pct: 3.0,
+        color: TextColor { r: 255, g: 255, b: 255, a: 255 },
+        anchor: chalkraw_core::WatermarkAnchor::BottomRight,
+        opacity: 0.9,
+        margin_pct: 3.0,
+        rotation_deg: 0.0,
+    }));
+
+    let items = vec![BatchItem {
+        source_path: fixture_path(),
+        edit: EditState::default(),
+        original_name: "txt".into(),
+    }];
+    let opts = BatchOptions {
+        format: ExportFormat::Jpeg { quality: 80 },
+        resize: ExportResize::LongEdge(512),
+        output_dir: dir.path().to_path_buf(),
+        name_pattern: "{name}_text".into(),
+        watermark: None,
+        watermark_preset: Some(preset),
     };
     let results = export_batch(&rd, &items, &opts, |_, _, _| {});
     assert_eq!(results.len(), 1);
