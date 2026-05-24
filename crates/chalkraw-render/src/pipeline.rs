@@ -22,12 +22,27 @@ pub struct DevelopPipeline {
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub sampler: wgpu::Sampler,
     pub uniform_buffer: wgpu::Buffer,
+    /// True when the output format is NOT sRGB-coded (e.g. Bgra8Unorm).
+    /// The fragment shader reads this flag and applies a manual IEC 61966-2-1
+    /// linear→sRGB encode at the end of fs_main.  sRGB-coded formats
+    /// (Bgra8UnormSrgb, Rgba8UnormSrgb) and linear-float formats
+    /// (Rgba16Float, Rgba32Float) do not need it.
+    pub manual_srgb_needed: bool,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
 }
 
 impl DevelopPipeline {
     pub fn new(rd: &RenderDevice, cfg: PipelineConfig) -> Self {
+        // Determine whether the fragment shader must manually apply sRGB encoding.
+        // Float formats (Rgba16Float, Rgba32Float) are linear targets used in
+        // off-screen export — no encode needed there either.
+        let manual_srgb_needed = !cfg.output_format.is_srgb()
+            && !matches!(
+                cfg.output_format,
+                wgpu::TextureFormat::Rgba16Float | wgpu::TextureFormat::Rgba32Float
+            );
+
         let shader = rd.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("develop.wgsl"),
             source: wgpu::ShaderSource::Wgsl(
@@ -122,13 +137,19 @@ impl DevelopPipeline {
             bind_group_layout,
             sampler,
             uniform_buffer,
+            manual_srgb_needed,
             device: rd.device.clone(),
             queue: rd.queue.clone(),
         }
     }
 
     pub fn update_uniforms(&self, u: &EditUniforms) {
-        self.queue.write_buffer(&self.uniform_buffer, 0, bytes_of(u));
+        // Patch in the sRGB flag that depends on the pipeline's output format,
+        // not on the edit state, then write the whole struct to the GPU buffer.
+        let mut copy = *u;
+        copy.srgb_output = if self.manual_srgb_needed { 1 } else { 0 };
+        copy._pad_srgb = [0; 3];
+        self.queue.write_buffer(&self.uniform_buffer, 0, bytes_of(&copy));
     }
 
     pub fn make_bind_group(&self, source: &SourceTexture) -> wgpu::BindGroup {

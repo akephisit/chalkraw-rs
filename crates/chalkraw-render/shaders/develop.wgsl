@@ -62,7 +62,9 @@
 // 336   crop_h           f32
 // 340   crop_rotation_deg f32
 // 344   _pad_crop        vec2<f32>
-// Total: 352 bytes.
+// Phase 0.13.2 (manual sRGB): vec4<u32> = 16 bytes.
+// 352   srgb_pad         vec4<u32>   .x = srgb_output flag (1 = encode, 0 = skip)
+// Total: 368 bytes.
 
 struct EditUniforms {
     exposure:           f32,
@@ -114,6 +116,10 @@ struct EditUniforms {
     crop_h:             f32,
     crop_rotation_deg:  f32,
     _pad_crop:          vec2<f32>,
+    // Phase 0.13.2: manual sRGB encode flag (offset 352..368).
+    // Packed as vec4<u32> so the WGSL struct size matches the Rust layout exactly:
+    // .x = srgb_output (1 = manual encode, 0 = hardware does it), .yzw = padding.
+    srgb_pad:           vec4<u32>,
 };
 
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
@@ -160,6 +166,17 @@ fn cg_tint_rgb(hue_deg: f32, sat: f32) -> vec3<f32> {
     let rgb = hsv_to_rgb(vec3<f32>(h01, 1.0, 1.0));
     let neutral = vec3<f32>(0.5);
     return (rgb - neutral) * (sat / 100.0) * 0.25;
+}
+
+// ── IEC 61966-2-1 linear→sRGB encode ─────────────────────────────────────────
+// Used when the output surface is not sRGB-coded (e.g. Bgra8Unorm). Input must
+// be clamped to [0, 1] before calling to keep pow() well-defined.
+fn linear_to_srgb(c: f32) -> f32 {
+    if (c <= 0.0031308) {
+        return c * 12.92;
+    } else {
+        return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+    }
 }
 
 struct VertexOut {
@@ -370,6 +387,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let r_corr = length(uv - centre_uv) * 1.41421356;  // sqrt(2) normalises corner to 1.0
     let lv_amount = edit.lens_vignetting / 100.0;
     rgb *= 1.0 + lv_amount * r_corr * r_corr * 0.5;
+
+    // Phase 0.13.2: manual sRGB encode — only when the output surface is not
+    // sRGB-coded (e.g. Bgra8Unorm on Windows). Clamp first to keep pow() safe.
+    // srgb_pad.x = srgb_output flag (1 = manual encode).
+    if (edit.srgb_pad.x == 1u) {
+        rgb = vec3<f32>(
+            linear_to_srgb(clamp(rgb.r, 0.0, 1.0)),
+            linear_to_srgb(clamp(rgb.g, 0.0, 1.0)),
+            linear_to_srgb(clamp(rgb.b, 0.0, 1.0)),
+        );
+    }
 
     return vec4<f32>(max(rgb, vec3<f32>(0.0)), a);
 }

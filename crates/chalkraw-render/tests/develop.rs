@@ -449,6 +449,74 @@ fn crop_enabled_top_left_quadrant_samples_correct_region() {
     );
 }
 
+/// Manual sRGB encoding (non-sRGB surface) should produce pixel values within
+/// ±2 levels of the hardware-encode path (sRGB surface).
+///
+/// Both pipelines receive the same linear-light source and the same default
+/// edit state.  The hardware path writes to Rgba8UnormSrgb (GPU encodes).
+/// The manual path writes to Rgba8Unorm with srgb_output=1 (shader encodes).
+/// After readback the centre pixel of both images should match closely.
+#[test]
+fn manual_srgb_encoding_matches_hardware_encoding() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skip: no GPU"); return; }
+    };
+    let w: u32 = 16;
+    let h: u32 = 16;
+    let pixels: Vec<f32> = (0..w * h).flat_map(|_| [0.5_f32, 0.5, 0.5, 1.0]).collect();
+    let edit = EditState::default();
+
+    // ── hardware sRGB path ────────────────────────────────────────────────────
+    let pipe_hw = DevelopPipeline::new(&rd, PipelineConfig {
+        output_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+    });
+    pipe_hw.update_uniforms(&EditUniforms::from(&edit));
+    let src_hw = SourceTexture::upload(&rd, w, h, &pixels);
+    let bg_hw = pipe_hw.make_bind_group(&src_hw);
+    let (tex_hw, view_hw) = make_target(&rd, w, h);
+    pipe_hw.render(&view_hw, &bg_hw);
+    let out_hw = read_to_cpu(&rd, &tex_hw, w, h).unwrap();
+
+    // ── manual sRGB path (Rgba8Unorm, shader encodes) ─────────────────────────
+    let pipe_sw = DevelopPipeline::new(&rd, PipelineConfig {
+        output_format: wgpu::TextureFormat::Rgba8Unorm,
+    });
+    // Verify the flag was set correctly.
+    assert!(pipe_sw.manual_srgb_needed, "pipeline with Rgba8Unorm should set manual_srgb_needed");
+
+    pipe_sw.update_uniforms(&EditUniforms::from(&edit));
+    let src_sw = SourceTexture::upload(&rd, w, h, &pixels);
+    let bg_sw = pipe_sw.make_bind_group(&src_sw);
+
+    // Create a non-sRGB render target manually (make_target always uses Rgba8UnormSrgb).
+    let target_sw = rd.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("readback target non-srgb"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view_sw = target_sw.create_view(&wgpu::TextureViewDescriptor::default());
+    pipe_sw.render(&view_sw, &bg_sw);
+    let out_sw = read_to_cpu(&rd, &target_sw, w, h).unwrap();
+
+    // Centre pixel of both outputs should match within ±2 byte levels.
+    let center_hw = &out_hw[((8 * w + 8) * 4) as usize..];
+    let center_sw = &out_sw[((8 * w + 8) * 4) as usize..];
+    for c in 0..3 {
+        let diff = (center_hw[c] as i32 - center_sw[c] as i32).unsigned_abs();
+        assert!(
+            diff <= 2,
+            "channel {c} differs: hw={} sw={} (manual sRGB should match hardware sRGB within ±2)",
+            center_hw[c], center_sw[c]
+        );
+    }
+}
+
 /// Vibrance=+100 on a near-grey pixel should boost saturation more than
 /// Vibrance=0, but not exceed what full Saturation=+100 would do.
 #[test]
