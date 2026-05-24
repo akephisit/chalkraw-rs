@@ -371,6 +371,10 @@ pub struct ChalkrawApp {
     thumb_textures: HashMap<PhotoId, egui::TextureHandle>,
     export_dialog: Option<ExportDialogState>,
     watermark_editor: Option<WatermarkEditorState>,
+    /// Cached egui textures for image layers shown in the watermark preview overlay.
+    /// Keyed by the absolute PNG path; cleared when the editor opens or closes so
+    /// stale entries don't accumulate across sessions.
+    watermark_preview_textures: HashMap<PathBuf, egui::TextureHandle>,
 }
 
 impl ChalkrawApp {
@@ -386,7 +390,14 @@ impl ChalkrawApp {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("default.chalkraw"));
         let state = AppState::bootstrap(fixture, catalog_path)?;
-        Ok(Self { state, gpu: None, thumb_textures: HashMap::new(), export_dialog: None, watermark_editor: None })
+        Ok(Self {
+            state,
+            gpu: None,
+            thumb_textures: HashMap::new(),
+            export_dialog: None,
+            watermark_editor: None,
+            watermark_preview_textures: HashMap::new(),
+        })
     }
 
     fn ensure_gpu(&mut self, frame: &eframe::Frame) {
@@ -430,6 +441,124 @@ impl ChalkrawApp {
                 )
             })
             .clone()
+    }
+}
+
+// ── Phase 5C: watermark preview overlay helpers ───────────────────────────────
+
+/// Compute the top-left screen position for a watermark element of size
+/// `(w, h)` relative to `image_rect`, honouring the `anchor` and a screen-space
+/// `margin`.
+fn anchor_pos(
+    image_rect: egui::Rect,
+    w: f32,
+    h: f32,
+    anchor: chalkraw_core::WatermarkAnchor,
+    margin: f32,
+) -> egui::Pos2 {
+    use chalkraw_core::WatermarkAnchor::*;
+    let (x, y) = match anchor {
+        TopLeft      => (image_rect.min.x + margin,         image_rect.min.y + margin),
+        TopCenter    => (image_rect.center().x - w / 2.0,   image_rect.min.y + margin),
+        TopRight     => (image_rect.max.x - w - margin,     image_rect.min.y + margin),
+        CenterLeft   => (image_rect.min.x + margin,         image_rect.center().y - h / 2.0),
+        Center       => (image_rect.center().x - w / 2.0,   image_rect.center().y - h / 2.0),
+        CenterRight  => (image_rect.max.x - w - margin,     image_rect.center().y - h / 2.0),
+        BottomLeft   => (image_rect.min.x + margin,         image_rect.max.y - h - margin),
+        BottomCenter => (image_rect.center().x - w / 2.0,   image_rect.max.y - h - margin),
+        BottomRight  => (image_rect.max.x - w - margin,     image_rect.max.y - h - margin),
+    };
+    egui::Pos2::new(x, y)
+}
+
+/// Draw all layers of `preset` on top of the canvas area defined by `image_rect`.
+///
+/// This is an **approximate** preview only — egui's font rasteriser and
+/// image-scaling differ from the ab_glyph / image-crate composition done at
+/// export time. Position, anchor, size %, and opacity are accurate; exact pixel
+/// values are not.
+fn draw_watermark_overlay(
+    ctx: &egui::Context,
+    ui: &mut egui::Ui,
+    image_rect: egui::Rect,
+    image_w: u32,
+    image_h: u32,
+    preset: &chalkraw_core::WatermarkPreset,
+    image_layer_textures: &mut HashMap<PathBuf, egui::TextureHandle>,
+) {
+    let long_edge_screen = image_rect.width().max(image_rect.height());
+    let long_edge_image = image_w.max(image_h) as f32;
+    // How many screen pixels correspond to one source-image pixel.
+    let scale = long_edge_screen / long_edge_image;
+
+    for layer in &preset.layers {
+        match layer {
+            chalkraw_core::WatermarkLayer::Image(img_layer) => {
+                // Load (and cache) the PNG as an egui texture if needed.
+                if !image_layer_textures.contains_key(&img_layer.png_path)
+                    && img_layer.png_path.exists()
+                {
+                    if let Ok(bytes) = std::fs::read(&img_layer.png_path) {
+                        if let Ok(decoded) = image::load_from_memory(&bytes) {
+                            let rgba = decoded.to_rgba8();
+                            let (w, h) = rgba.dimensions();
+                            let ci = egui::ColorImage::from_rgba_unmultiplied(
+                                [w as usize, h as usize],
+                                rgba.as_raw(),
+                            );
+                            let tex = ctx.load_texture(
+                                format!("wm-{}", img_layer.png_path.display()),
+                                ci,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            image_layer_textures.insert(img_layer.png_path.clone(), tex);
+                        }
+                    }
+                }
+                let Some(tex) = image_layer_textures.get(&img_layer.png_path) else {
+                    continue;
+                };
+
+                let target_long_screen = img_layer.size_pct / 100.0 * long_edge_screen;
+                let aspect = tex.aspect_ratio(); // w / h
+                let (w_screen, h_screen) = if aspect >= 1.0 {
+                    (target_long_screen, target_long_screen / aspect)
+                } else {
+                    (target_long_screen * aspect, target_long_screen)
+                };
+                let margin_screen = img_layer.margin_pct / 100.0 * long_edge_screen;
+                let pos = anchor_pos(image_rect, w_screen, h_screen, img_layer.anchor, margin_screen);
+                let layer_rect = egui::Rect::from_min_size(pos, egui::vec2(w_screen, h_screen));
+
+                let alpha = (img_layer.opacity.clamp(0.0, 1.0) * 255.0) as u8;
+                let tint = egui::Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha);
+                let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+                ui.painter().image(tex.id(), layer_rect, uv, tint);
+            }
+
+            chalkraw_core::WatermarkLayer::Text(text_layer) => {
+                let px_size_image = text_layer.font_size_pct / 100.0 * long_edge_image;
+                let px_size_screen = px_size_image * scale;
+                let font_id = egui::FontId::proportional(px_size_screen);
+                let alpha = (text_layer.color.a as f32 * text_layer.opacity.clamp(0.0, 1.0)) as u8;
+                let text_color = egui::Color32::from_rgba_unmultiplied(
+                    text_layer.color.r,
+                    text_layer.color.g,
+                    text_layer.color.b,
+                    alpha,
+                );
+                // Measure the text so we can honour the anchor correctly.
+                let galley = ui.painter().layout_no_wrap(
+                    text_layer.text.clone(),
+                    font_id,
+                    text_color,
+                );
+                let (w, h) = (galley.size().x, galley.size().y);
+                let margin_screen = text_layer.margin_pct / 100.0 * long_edge_screen;
+                let pos = anchor_pos(image_rect, w, h, text_layer.anchor, margin_screen);
+                ui.painter().galley(pos, galley, text_color);
+            }
+        }
     }
 }
 
@@ -593,6 +722,14 @@ impl eframe::App for ChalkrawApp {
             }
         });
 
+        // Phase 5C: snapshot the working preset (if the editor is open) so we can
+        // draw the overlay inside the CentralPanel closure without conflicting
+        // borrows against self.watermark_editor.
+        let wm_preview: Option<chalkraw_core::WatermarkPreset> =
+            self.watermark_editor.as_ref().map(|e| e.current.clone());
+        let image_w = self.state.image.width;
+        let image_h = self.state.image.height;
+
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(gpu) = self.gpu.as_ref() {
                 if edit_changed {
@@ -606,7 +743,7 @@ impl eframe::App for ChalkrawApp {
                 // Issue 2: letterbox — preserve image aspect ratio rather than
                 // stretching to fill the entire central panel.
                 let available = ui.available_size();
-                let img_aspect = self.state.image.width as f32 / self.state.image.height as f32;
+                let img_aspect = image_w as f32 / image_h as f32;
                 let avail_aspect = available.x / available.y;
                 let (rect_w, rect_h) = if img_aspect >= avail_aspect {
                     // Image wider than panel — fit width, letterbox top/bottom.
@@ -627,6 +764,19 @@ impl eframe::App for ChalkrawApp {
                         CanvasCallback { gpu: gpu.clone() },
                     ),
                 ));
+
+                // Phase 5C: draw watermark preview overlay when the editor is open.
+                if let Some(ref preset) = wm_preview {
+                    draw_watermark_overlay(
+                        ctx,
+                        ui,
+                        image_rect,
+                        image_w,
+                        image_h,
+                        preset,
+                        &mut self.watermark_preview_textures,
+                    );
+                }
             } else {
                 ui.label("Initialising GPU…");
             }
@@ -773,6 +923,7 @@ impl eframe::App for ChalkrawApp {
                                 });
                             ui.horizontal(|ui| {
                                 if ui.button("New Watermark…").clicked() {
+                                    self.watermark_preview_textures.clear();
                                     self.watermark_editor = Some(WatermarkEditorState {
                                         open: true,
                                         current: chalkraw_core::WatermarkPreset::new("New Watermark".into()),
@@ -785,6 +936,7 @@ impl eframe::App for ChalkrawApp {
                                     if ui.button("Edit…").clicked() {
                                         if let Some(id) = dlg.watermark_preset_id {
                                             if let Some(p) = presets.iter().find(|p| p.id == id) {
+                                                self.watermark_preview_textures.clear();
                                                 self.watermark_editor = Some(WatermarkEditorState {
                                                     open: true,
                                                     current: p.clone(),
@@ -1212,10 +1364,12 @@ impl eframe::App for ChalkrawApp {
                     if let Some(ref mut dlg) = self.export_dialog {
                         dlg.watermark_preset_id = Some(preset.id);
                     }
+                    self.watermark_preview_textures.clear();
                     self.watermark_editor = None;
                 }
             }
             if close_clicked || !open {
+                self.watermark_preview_textures.clear();
                 self.watermark_editor = None;
             }
         }
