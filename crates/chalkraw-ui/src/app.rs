@@ -180,6 +180,20 @@ impl AppState {
         self.catalog.delete_preset(id).map_err(Into::into)
     }
 
+    /// Navigate to the next (+1) or previous (−1) photo in the catalog.
+    /// Wraps around at both ends (Lightroom convention).
+    pub fn navigate(&mut self, delta: i32) -> anyhow::Result<()> {
+        let photos = self.catalog.list_photos()?;
+        if photos.is_empty() {
+            return Ok(());
+        }
+        let current_idx = photos.iter().position(|p| p.id == self.photo_id).unwrap_or(0);
+        let new_idx =
+            ((current_idx as i32 + delta).rem_euclid(photos.len() as i32)) as usize;
+        let new_path = photos[new_idx].original_path.clone();
+        self.switch_to_path(new_path)
+    }
+
     /// Gather batch items from the catalog. If `only_picks` is true, filters to
     /// photos flagged as Pick. Skips photos whose original_path doesn't exist.
     pub fn collect_batch_items(
@@ -392,6 +406,7 @@ impl eframe::App for ChalkrawApp {
         self.ensure_gpu(frame);
 
         let mut to_set: Option<Flag> = None;
+        let mut nav: Option<i32> = None;
         ctx.input(|i| {
             if i.key_pressed(egui::Key::P) {
                 to_set = Some(Flag::Pick);
@@ -400,9 +415,26 @@ impl eframe::App for ChalkrawApp {
             } else if i.key_pressed(egui::Key::X) {
                 to_set = Some(Flag::Reject);
             }
+
+            // Issue 5: Lightroom-style photo navigation.
+            // ArrowRight / ] → next photo.  ArrowLeft / [ → previous photo.
+            if i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::CloseBracket) {
+                nav = Some(1);
+            } else if i.key_pressed(egui::Key::ArrowLeft)
+                || i.key_pressed(egui::Key::OpenBracket)
+            {
+                nav = Some(-1);
+            }
         });
         if let Some(f) = to_set {
             self.state.set_current_flag(f);
+        }
+        if let Some(delta) = nav {
+            if let Err(e) = self.state.navigate(delta) {
+                log::warn!("navigate failed: {e}");
+            } else {
+                self.gpu = None; // force CanvasGpu rebuild for new source
+            }
         }
 
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
@@ -535,12 +567,29 @@ impl eframe::App for ChalkrawApp {
                     gpu.update(&self.state.edit);
                     self.state.mark_dirty();
                 }
-                let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
+                // Issue 2: letterbox — preserve image aspect ratio rather than
+                // stretching to fill the entire central panel.
+                let available = ui.available_size();
+                let img_aspect = self.state.image.width as f32 / self.state.image.height as f32;
+                let avail_aspect = available.x / available.y;
+                let (rect_w, rect_h) = if img_aspect >= avail_aspect {
+                    // Image wider than panel — fit width, letterbox top/bottom.
+                    (available.x, available.x / img_aspect)
+                } else {
+                    // Image taller than panel — fit height, letterbox left/right.
+                    (available.y * img_aspect, available.y)
+                };
+                let (full_rect, _) =
+                    ui.allocate_exact_size(available, egui::Sense::drag());
+                let image_rect = egui::Rect::from_center_size(
+                    full_rect.center(),
+                    egui::vec2(rect_w, rect_h),
+                );
                 ui.painter().add(egui::Shape::Callback(
                     egui_wgpu::Callback::new_paint_callback(
-                        rect,
+                        image_rect,
                         CanvasCallback { gpu: gpu.clone() },
-                    )
+                    ),
                 ));
             } else {
                 ui.label("Initialising GPU…");

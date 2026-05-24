@@ -47,8 +47,79 @@ fn to_linear(rgba8: &image::RgbaImage) -> Vec<f32> {
     pixels
 }
 
+/// Read the EXIF Orientation tag (1–8) from a file.
+/// Returns 1 (identity) when the file has no EXIF or no Orientation tag.
+fn read_exif_orientation(path: &Path) -> u32 {
+    use exif::{In, Reader, Tag};
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return 1,
+    };
+    let mut buf = std::io::BufReader::new(file);
+    let exif = match Reader::new().read_from_container(&mut buf) {
+        Ok(e) => e,
+        Err(_) => return 1,
+    };
+    exif.get_field(Tag::Orientation, In::PRIMARY)
+        .and_then(|f| f.value.get_uint(0))
+        .unwrap_or(1)
+}
+
+/// Read the EXIF Orientation tag (1–8) from an in-memory byte slice.
+/// Returns 1 (identity) when there is no EXIF or no Orientation tag.
+fn read_exif_orientation_bytes(bytes: &[u8]) -> u32 {
+    use exif::{In, Reader, Tag};
+    let mut cur = Cursor::new(bytes);
+    let exif = match Reader::new().read_from_container(&mut cur) {
+        Ok(e) => e,
+        Err(_) => return 1,
+    };
+    exif.get_field(Tag::Orientation, In::PRIMARY)
+        .and_then(|f| f.value.get_uint(0))
+        .unwrap_or(1)
+}
+
+/// Apply the EXIF orientation transform to an RgbaImage.
+/// Orientation values follow the EXIF spec (JEITA CP-3451C Table 1).
+pub(crate) fn apply_orientation(img: image::RgbaImage, orientation: u32) -> image::RgbaImage {
+    use image::imageops;
+    match orientation {
+        2 => imageops::flip_horizontal(&img),
+        3 => imageops::rotate180(&img),
+        4 => imageops::flip_vertical(&img),
+        5 => imageops::rotate90(&imageops::flip_horizontal(&img)),
+        6 => imageops::rotate90(&img),
+        7 => imageops::rotate270(&imageops::flip_horizontal(&img)),
+        8 => imageops::rotate270(&img),
+        _ => img, // orientation 1 or unknown → no-op
+    }
+}
+
+/// Log the presence of an embedded ICC profile in a JPEG file.
+/// Full ICC colour management is deferred to a dedicated phase; this log
+/// helps diagnose "colours look different from source" reports.
+fn log_icc_profile_if_present(path: &Path) {
+    if let Ok(file) = std::fs::File::open(path) {
+        let reader = std::io::BufReader::new(file);
+        if let Ok(mut decoder) = image::codecs::jpeg::JpegDecoder::new(reader) {
+            use image::ImageDecoder;
+            if let Ok(Some(icc)) = decoder.icc_profile() {
+                log::info!(
+                    "decode_image {path:?}: ICC profile present ({} bytes), treating as sRGB — \
+                     full ICC colour management deferred to a future phase",
+                    icc.len()
+                );
+            }
+        }
+    }
+}
+
 pub fn decode_image(path: impl AsRef<Path>) -> Result<LinearImage, IoError> {
     let path: PathBuf = path.as_ref().to_path_buf();
+
+    // Issue 3: log ICC profile presence so users can confirm the cause of
+    // colour differences when their camera embeds a non-sRGB profile.
+    log_icc_profile_if_present(&path);
 
     let reader = ImageReader::open(&path)
         .map_err(|e| match e.kind() {
@@ -61,8 +132,12 @@ pub fn decode_image(path: impl AsRef<Path>) -> Result<LinearImage, IoError> {
     let format = match_format(reader.format(), &path)?;
     let dyn_img = reader.decode().map_err(|e| IoError::DecodeFailed { path: path.clone(), source: e })?;
     let rgba8 = dyn_img.to_rgba8();
-    let (w, h) = rgba8.dimensions();
 
+    // Issue 1: apply EXIF orientation before converting to linear.
+    let orientation = read_exif_orientation(&path);
+    let rgba8 = apply_orientation(rgba8, orientation);
+
+    let (w, h) = rgba8.dimensions();
     Ok(LinearImage { width: w, height: h, format, pixels: to_linear(&rgba8) })
 }
 
@@ -79,8 +154,12 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Result<LinearImage, IoError> {
     let format = match_format(reader.format(), &synthetic)?;
     let dyn_img = reader.decode().map_err(|e| IoError::DecodeFailed { path: synthetic.clone(), source: e })?;
     let rgba8 = dyn_img.to_rgba8();
-    let (w, h) = rgba8.dimensions();
 
+    // Issue 1: apply EXIF orientation from the byte stream.
+    let orientation = read_exif_orientation_bytes(bytes);
+    let rgba8 = apply_orientation(rgba8, orientation);
+
+    let (w, h) = rgba8.dimensions();
     Ok(LinearImage { width: w, height: h, format, pixels: to_linear(&rgba8) })
 }
 
@@ -208,6 +287,24 @@ mod tests {
         assert_eq!(img.height, 4);
         assert_eq!(img.format, ImageFormat::Png);
         assert_eq!(img.pixels.len(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn orientation_1_is_identity() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/sample.jpg");
+        let img = decode_image(path).unwrap();
+        // sample.jpg is 1024×768 with no EXIF orientation — dimensions must be unchanged.
+        assert_eq!(img.width, 1024);
+        assert_eq!(img.height, 768);
+    }
+
+    #[test]
+    fn apply_orientation_rotates_90_swaps_dimensions() {
+        let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_fn(10, 20, |x, _| {
+            image::Rgba([x as u8, 0, 0, 255])
+        });
+        let rotated = apply_orientation(img, 6); // 90 CW swaps width and height
+        assert_eq!(rotated.dimensions(), (20, 10));
     }
 
     #[test]

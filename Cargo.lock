@@ -689,7 +689,7 @@ dependencies = [
 
 [[package]]
 name = "chalkraw-catalog"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "bincode",
  "chalkraw-core",
@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "chalkraw-core"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "bincode",
  "chrono",
@@ -716,7 +716,7 @@ dependencies = [
 
 [[package]]
 name = "chalkraw-export"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "chalkraw-core",
  "chalkraw-io",
@@ -731,18 +731,19 @@ dependencies = [
 
 [[package]]
 name = "chalkraw-io"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "chalkraw-core",
  "image",
  "kamadak-exif",
+ "log",
  "tempfile",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "chalkraw-render"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "bytemuck",
  "chalkraw-core",
@@ -754,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "chalkraw-ui"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "blake3",

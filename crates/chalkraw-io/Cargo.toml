@@ -9,6 +9,7 @@ license.workspace = true
 chalkraw-core = { workspace = true }
 image = { workspace = true }
 kamadak-exif = { workspace = true }
+log = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
