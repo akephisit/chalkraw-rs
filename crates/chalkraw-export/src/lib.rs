@@ -73,7 +73,10 @@ pub struct BatchOptions {
     pub output_dir: PathBuf,
     /// May contain `{name}`, `{date}`, `{ext}` tokens.
     pub name_pattern: String,
+    /// Single-layer watermark stamp (back-compat; used when `watermark_preset` is None).
     pub watermark: Option<WatermarkStamp>,
+    /// Multi-layer watermark preset. Takes priority over `watermark` when Some.
+    pub watermark_preset: Option<chalkraw_core::WatermarkPreset>,
 }
 
 #[derive(Debug)]
@@ -239,7 +242,11 @@ fn export_single_item(
     pipeline.render(&view, &bind_group);
     let mut pixels_rgba = read_to_cpu(rd, &target, out_w, out_h)?;
 
-    if let Some(ref wm) = opts.watermark {
+    if let Some(ref preset) = opts.watermark_preset {
+        if let Err(e) = apply_watermark_preset(&mut pixels_rgba, out_w, out_h, preset) {
+            log::warn!("watermark preset failed, exporting without stamp: {e}");
+        }
+    } else if let Some(ref wm) = opts.watermark {
         // Non-fatal: if the stamp fails, log and continue without it.
         if let Err(e) = apply_watermark(&mut pixels_rgba, out_w, out_h, wm) {
             log::warn!("watermark failed, exporting without stamp: {e}");
@@ -249,6 +256,47 @@ fn export_single_item(
     let pixels_rgb = strip_alpha(&pixels_rgba);
     encode_and_write(output_path, &pixels_rgb, out_w, out_h, opts.format)?;
     Ok(())
+}
+
+/// Composite each layer of a `WatermarkPreset` onto `base_rgba` in order.
+/// Rotation is in the data model but not applied in Phase 5A — layers are
+/// composited at `rotation_deg = 0`. Phase 5 polish will add rotation.
+pub fn apply_watermark_preset(
+    base_rgba: &mut [u8],
+    base_w: u32,
+    base_h: u32,
+    preset: &chalkraw_core::WatermarkPreset,
+) -> Result<(), ExportError> {
+    for layer in &preset.layers {
+        match layer {
+            chalkraw_core::WatermarkLayer::Image(img_layer) => {
+                let stamp = WatermarkStamp {
+                    png_path: img_layer.png_path.clone(),
+                    anchor: map_anchor(img_layer.anchor),
+                    size_pct: img_layer.size_pct,
+                    opacity: img_layer.opacity,
+                    margin_pct: img_layer.margin_pct,
+                };
+                apply_watermark(base_rgba, base_w, base_h, &stamp)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn map_anchor(a: chalkraw_core::WatermarkAnchor) -> WatermarkAnchor {
+    use chalkraw_core::WatermarkAnchor as Core;
+    match a {
+        Core::TopLeft => WatermarkAnchor::TopLeft,
+        Core::TopCenter => WatermarkAnchor::TopCenter,
+        Core::TopRight => WatermarkAnchor::TopRight,
+        Core::CenterLeft => WatermarkAnchor::CenterLeft,
+        Core::Center => WatermarkAnchor::Center,
+        Core::CenterRight => WatermarkAnchor::CenterRight,
+        Core::BottomLeft => WatermarkAnchor::BottomLeft,
+        Core::BottomCenter => WatermarkAnchor::BottomCenter,
+        Core::BottomRight => WatermarkAnchor::BottomRight,
+    }
 }
 
 fn apply_watermark(

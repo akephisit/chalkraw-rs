@@ -6,6 +6,9 @@ use chalkraw_export::{
 use chalkraw_render::RenderDevice;
 use std::path::PathBuf;
 
+#[allow(unused_imports)]
+use chalkraw_core::{ImageLayer, WatermarkLayer, WatermarkPreset};
+
 fn fixture_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop();
@@ -44,6 +47,7 @@ fn export_batch_writes_one_file_per_item() {
         output_dir: dir.path().to_path_buf(),
         name_pattern: "{name}_test".into(),
         watermark: None,
+        watermark_preset: None,
     };
     let results = export_batch(&rd, &items, &opts, |_, _, _| {});
     assert_eq!(results.len(), 2);
@@ -85,6 +89,63 @@ fn export_batch_with_watermark_completes() {
             opacity: 0.8,
             margin_pct: 5.0,
         }),
+        watermark_preset: None,
+    };
+    let results = export_batch(&rd, &items, &opts, |_, _, _| {});
+    assert_eq!(results.len(), 1);
+    assert!(results[0].error.is_none(), "error: {:?}", results[0].error);
+    assert!(results[0].output_path.as_ref().unwrap().exists());
+}
+
+#[test]
+fn export_with_watermark_preset_composites_two_layers() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => {
+            eprintln!("skip: no GPU");
+            return;
+        }
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let wm1_path = dir.path().join("wm1.png");
+    let wm2_path = dir.path().join("wm2.png");
+    image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(8, 8, image::Rgba([255, 0, 0, 200]))
+        .save(&wm1_path)
+        .unwrap();
+    image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(8, 8, image::Rgba([0, 255, 0, 200]))
+        .save(&wm2_path)
+        .unwrap();
+
+    let mut preset = WatermarkPreset::new("test".into());
+    preset.layers.push(WatermarkLayer::Image(ImageLayer {
+        png_path: wm1_path,
+        anchor: chalkraw_core::WatermarkAnchor::TopLeft,
+        size_pct: 25.0,
+        opacity: 1.0,
+        margin_pct: 5.0,
+        rotation_deg: 0.0,
+    }));
+    preset.layers.push(WatermarkLayer::Image(ImageLayer {
+        png_path: wm2_path,
+        anchor: chalkraw_core::WatermarkAnchor::BottomRight,
+        size_pct: 25.0,
+        opacity: 1.0,
+        margin_pct: 5.0,
+        rotation_deg: 0.0,
+    }));
+
+    let items = vec![BatchItem {
+        source_path: fixture_path(),
+        edit: EditState::default(),
+        original_name: "twolayers".into(),
+    }];
+    let opts = BatchOptions {
+        format: ExportFormat::Jpeg { quality: 80 },
+        resize: ExportResize::LongEdge(512),
+        output_dir: dir.path().to_path_buf(),
+        name_pattern: "{name}_two".into(),
+        watermark: None,
+        watermark_preset: Some(preset),
     };
     let results = export_batch(&rd, &items, &opts, |_, _, _| {});
     assert_eq!(results.len(), 1);

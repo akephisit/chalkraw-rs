@@ -13,6 +13,8 @@ pub(crate) const META_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("meta");
 pub(crate) const PRESETS_TABLE: TableDefinition<&[u8; 16], &[u8]> =
     TableDefinition::new("presets");
+pub(crate) const WATERMARKS_TABLE: TableDefinition<&[u8; 16], &[u8]> =
+    TableDefinition::new("watermarks");
 
 const META_KEY: &str = "meta";
 
@@ -43,6 +45,7 @@ impl Catalog {
                 let _ = write.open_table(PHOTOS_TABLE)?;
                 let _ = write.open_table(EDITS_TABLE)?;
                 let _ = write.open_table(PRESETS_TABLE)?;
+                let _ = write.open_table(WATERMARKS_TABLE)?;
                 let mut meta = write.open_table(META_TABLE)?;
                 // FIXME(phase 2): existed-but-missing-meta currently silently
                 // recreates meta, masking corruption. Consider returning

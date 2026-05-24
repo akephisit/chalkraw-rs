@@ -269,6 +269,20 @@ struct WatermarkDialogState {
     margin_pct: f32,
 }
 
+/// State for the watermark preset editor sub-dialog.
+struct WatermarkEditorState {
+    open: bool,
+    /// Working copy of the preset being edited or created.
+    current: chalkraw_core::WatermarkPreset,
+    /// True when creating a brand-new preset (vs editing an existing one).
+    /// Used in Phase 5B to decide whether to show "Create" or "Update" in the
+    /// title bar. Retained in the data model to avoid a breaking change later.
+    #[allow(dead_code)]
+    is_new: bool,
+    /// Which layer row is expanded (0-based index), None = all collapsed.
+    expanded_layer: Option<usize>,
+}
+
 impl Default for WatermarkDialogState {
     fn default() -> Self {
         Self {
@@ -321,8 +335,10 @@ struct ExportDialogState {
     // Output
     output_dir: Option<PathBuf>,
     name_pattern: String,
-    // Watermark
+    // Watermark — quick inline stamp (legacy single-layer)
     watermark: WatermarkDialogState,
+    // Watermark preset selection
+    watermark_preset_id: Option<chalkraw_core::WatermarkId>,
     // Runtime state
     batch_progress: Option<Arc<Mutex<BatchProgress>>>,
     /// Set when the batch completed — holds counts for display.
@@ -340,6 +356,7 @@ impl Default for ExportDialogState {
             output_dir: None,
             name_pattern: "{name}_edited".to_string(),
             watermark: WatermarkDialogState::default(),
+            watermark_preset_id: None,
             batch_progress: None,
             completion_message: None,
         }
@@ -353,6 +370,7 @@ pub struct ChalkrawApp {
     gpu: Option<Arc<CanvasGpu>>,
     thumb_textures: HashMap<PhotoId, egui::TextureHandle>,
     export_dialog: Option<ExportDialogState>,
+    watermark_editor: Option<WatermarkEditorState>,
 }
 
 impl ChalkrawApp {
@@ -368,7 +386,7 @@ impl ChalkrawApp {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("default.chalkraw"));
         let state = AppState::bootstrap(fixture, catalog_path)?;
-        Ok(Self { state, gpu: None, thumb_textures: HashMap::new(), export_dialog: None })
+        Ok(Self { state, gpu: None, thumb_textures: HashMap::new(), export_dialog: None, watermark_editor: None })
     }
 
     fn ensure_gpu(&mut self, frame: &eframe::Frame) {
@@ -738,6 +756,58 @@ impl eframe::App for ChalkrawApp {
                     egui::CollapsingHeader::new("Watermark")
                         .default_open(false)
                         .show(ui, |ui| {
+                            // ── Preset picker (top half) ──────────────────────
+                            ui.label(egui::RichText::new("Saved Presets").strong());
+                            let presets = self.state.catalog.list_watermarks().unwrap_or_default();
+                            let preset_label = dlg.watermark_preset_id
+                                .and_then(|id| presets.iter().find(|p| p.id == id))
+                                .map(|p| p.name.as_str())
+                                .unwrap_or("(none)");
+                            egui::ComboBox::from_id_salt("wm_preset_combo")
+                                .selected_text(preset_label)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut dlg.watermark_preset_id, None, "(none)").clicked();
+                                    for p in &presets {
+                                        ui.selectable_value(&mut dlg.watermark_preset_id, Some(p.id), &p.name);
+                                    }
+                                });
+                            ui.horizontal(|ui| {
+                                if ui.button("New Watermark…").clicked() {
+                                    self.watermark_editor = Some(WatermarkEditorState {
+                                        open: true,
+                                        current: chalkraw_core::WatermarkPreset::new("New Watermark".into()),
+                                        is_new: true,
+                                        expanded_layer: None,
+                                    });
+                                }
+                                let can_edit = dlg.watermark_preset_id.is_some();
+                                ui.add_enabled_ui(can_edit, |ui| {
+                                    if ui.button("Edit…").clicked() {
+                                        if let Some(id) = dlg.watermark_preset_id {
+                                            if let Some(p) = presets.iter().find(|p| p.id == id) {
+                                                self.watermark_editor = Some(WatermarkEditorState {
+                                                    open: true,
+                                                    current: p.clone(),
+                                                    is_new: false,
+                                                    expanded_layer: None,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    if ui.button("Delete").clicked() {
+                                        if let Some(id) = dlg.watermark_preset_id {
+                                            if self.state.catalog.delete_watermark(id).is_ok() {
+                                                dlg.watermark_preset_id = None;
+                                            }
+                                        }
+                                    }
+                                });
+                            });
+
+                            ui.separator();
+
+                            // ── Quick stamp (bottom half, legacy single-layer) ─
+                            ui.label(egui::RichText::new("Quick Stamp (single layer, no preset)").strong());
                             ui.checkbox(&mut dlg.watermark.enabled, "Enable PNG watermark stamp");
                             if dlg.watermark.enabled {
                                 ui.horizontal(|ui| {
@@ -787,6 +857,11 @@ impl eframe::App for ChalkrawApp {
                                     ui.add(egui::Slider::new(&mut dlg.watermark.margin_pct, 0.0..=20.0).fixed_decimals(0));
                                 });
                             }
+                            ui.label(
+                                egui::RichText::new("Export uses preset if selected; otherwise quick stamp if enabled.")
+                                    .small()
+                                    .color(egui::Color32::GRAY),
+                            );
                         });
 
                     ui.separator();
@@ -823,12 +898,18 @@ impl eframe::App for ChalkrawApp {
                     } else {
                         chalkraw_export::ExportResize::Original
                     };
+                    // Resolve preset: load from catalog by id if one is selected.
+                    let watermark_preset = dlg_inner.watermark_preset_id.and_then(|id| {
+                        self.state.catalog.list_watermarks().ok()
+                            .and_then(|list| list.into_iter().find(|p| p.id == id))
+                    });
                     let opts = chalkraw_export::BatchOptions {
                         format,
                         resize,
                         output_dir,
                         name_pattern: dlg_inner.name_pattern.clone(),
                         watermark: dlg_inner.watermark.to_stamp(),
+                        watermark_preset,
                     };
                     let only_picks = dlg_inner.only_picks;
 
@@ -884,6 +965,166 @@ impl eframe::App for ChalkrawApp {
                         }
                     }
                 }
+            }
+        }
+
+        // ── Watermark preset editor sub-dialog ────────────────────────────────
+        if let Some(ref mut editor) = self.watermark_editor {
+            let mut open = editor.open;
+            let mut save_clicked = false;
+            let mut close_clicked = false;
+            let mut remove_layer: Option<usize> = None;
+            let mut add_layer = false;
+
+            egui::Window::new("Watermark Preset Editor")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(true)
+                .default_width(380.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut editor.current.name)
+                                .desired_width(240.0),
+                        );
+                    });
+                    ui.separator();
+                    ui.label(egui::RichText::new("Layers").strong());
+
+                    let anchor_labels = [
+                        "↖ TL", "↑ TC", "↗ TR",
+                        "← CL", "·  C", "→ CR",
+                        "↙ BL", "↓ BC", "↘ BR",
+                    ];
+                    fn anchor_to_idx(a: chalkraw_core::WatermarkAnchor) -> usize {
+                        use chalkraw_core::WatermarkAnchor::*;
+                        match a {
+                            TopLeft => 0, TopCenter => 1, TopRight => 2,
+                            CenterLeft => 3, Center => 4, CenterRight => 5,
+                            BottomLeft => 6, BottomCenter => 7, BottomRight => 8,
+                        }
+                    }
+                    fn idx_to_anchor(i: usize) -> chalkraw_core::WatermarkAnchor {
+                        use chalkraw_core::WatermarkAnchor::*;
+                        match i {
+                            0 => TopLeft, 1 => TopCenter, 2 => TopRight,
+                            3 => CenterLeft, 4 => Center, 5 => CenterRight,
+                            6 => BottomLeft, 7 => BottomCenter, _ => BottomRight,
+                        }
+                    }
+
+                    for (idx, layer) in editor.current.layers.iter_mut().enumerate() {
+                        let chalkraw_core::WatermarkLayer::Image(ref mut img) = layer;
+                        let header_text = format!(
+                            "Image: {}  [{}]  {}%  {}%",
+                            img.png_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "(unset)".into()),
+                            anchor_labels[anchor_to_idx(img.anchor)],
+                            img.size_pct as u32,
+                            (img.opacity * 100.0) as u32,
+                        );
+                        let is_expanded = editor.expanded_layer == Some(idx);
+                        if egui::CollapsingHeader::new(header_text)
+                            .id_salt(format!("wm_layer_{idx}"))
+                            .open(if is_expanded { Some(true) } else { None })
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("PNG:");
+                                    if ui.button("Browse…").clicked() {
+                                        if let Some(p) = rfd::FileDialog::new()
+                                            .add_filter("PNG", &["png"])
+                                            .pick_file()
+                                        {
+                                            img.png_path = p;
+                                        }
+                                    }
+                                });
+                                let path_str = img.png_path.display().to_string();
+                                if path_str.is_empty() {
+                                    ui.colored_label(egui::Color32::YELLOW, "(no PNG selected)");
+                                } else {
+                                    ui.label(&path_str);
+                                }
+                                ui.add_space(4.0);
+                                ui.label("Anchor:");
+                                let mut anchor_idx = anchor_to_idx(img.anchor);
+                                egui::Grid::new(format!("wm_anchor_{idx}")).num_columns(3).show(ui, |ui| {
+                                    for (i, label) in anchor_labels.iter().enumerate() {
+                                        let selected = anchor_idx == i;
+                                        if ui.add(egui::Button::new(*label).selected(selected)).clicked() {
+                                            anchor_idx = i;
+                                        }
+                                        if i % 3 == 2 { ui.end_row(); }
+                                    }
+                                });
+                                img.anchor = idx_to_anchor(anchor_idx);
+                                ui.horizontal(|ui| {
+                                    ui.label("Size (% long edge):");
+                                    ui.add(egui::Slider::new(&mut img.size_pct, 1.0..=50.0).fixed_decimals(0));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Opacity (%):");
+                                    let mut op_pct = img.opacity * 100.0;
+                                    ui.add(egui::Slider::new(&mut op_pct, 0.0..=100.0).fixed_decimals(0));
+                                    img.opacity = op_pct / 100.0;
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Margin (% long edge):");
+                                    ui.add(egui::Slider::new(&mut img.margin_pct, 0.0..=20.0).fixed_decimals(0));
+                                });
+                                if ui.button("Remove layer").clicked() {
+                                    remove_layer = Some(idx);
+                                }
+                            })
+                            .header_response
+                            .clicked()
+                        {
+                            editor.expanded_layer = if is_expanded { None } else { Some(idx) };
+                        }
+                    }
+
+                    if ui.button("+ Add Image Layer").clicked() {
+                        add_layer = true;
+                    }
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            save_clicked = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            close_clicked = true;
+                        }
+                    });
+                });
+
+            if let Some(idx) = remove_layer {
+                editor.current.layers.remove(idx);
+                if editor.expanded_layer == Some(idx) {
+                    editor.expanded_layer = None;
+                }
+            }
+            if add_layer {
+                let new_idx = editor.current.layers.len();
+                editor.current.layers.push(chalkraw_core::WatermarkLayer::Image(
+                    chalkraw_core::ImageLayer::default(),
+                ));
+                editor.expanded_layer = Some(new_idx);
+            }
+            if save_clicked {
+                let preset = editor.current.clone();
+                if let Err(e) = self.state.catalog.insert_watermark(&preset) {
+                    log::warn!("save watermark preset failed: {e}");
+                } else {
+                    // If editing an existing preset in the export dialog, keep selection.
+                    if let Some(ref mut dlg) = self.export_dialog {
+                        dlg.watermark_preset_id = Some(preset.id);
+                    }
+                    self.watermark_editor = None;
+                }
+            }
+            if close_clicked || !open {
+                self.watermark_editor = None;
             }
         }
 
