@@ -75,7 +75,9 @@ use chalkraw_core::EditState;
 /// 416  sharpening_detail   f32
 /// 420  sharpening_masking  f32
 /// 424  _pad_sharp_dm       [f32;2]
-/// Total: 432 bytes
+/// v0.19.1 (Atmospheric Light for Dehaze): 4 × f32 = 16 bytes.
+/// 432  atmospheric_light   [f32;4]  [r, g, b, 0.0]
+/// Total: 448 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct EditUniforms {
@@ -151,6 +153,8 @@ pub struct EditUniforms {
     pub sharpening_detail: f32,     // offset 416  0..100
     pub sharpening_masking: f32,    // offset 420  0..100
     pub _pad_sharp_dm: [f32; 2],    // offset 424  → pads to 432
+    // v0.19.1: Atmospheric light for Dehaze (4 × f32 = 16 bytes).
+    pub atmospheric_light: [f32; 4], // offset 432  [r, g, b, 0.0]
 }
 
 impl From<&EditState> for EditUniforms {
@@ -233,6 +237,9 @@ impl From<&EditState> for EditUniforms {
             sharpening_detail: e.detail.sharpening.detail,
             sharpening_masking: e.detail.sharpening.masking,
             _pad_sharp_dm: [0.0; 2],
+            // v0.19.1: Atmospheric light default (white); overridden by
+            // DevelopPipeline::set_atmospheric_light at source upload time.
+            atmospheric_light: [0.95, 0.95, 0.95, 0.0],
         }
     }
 }
@@ -243,7 +250,7 @@ mod tests {
 
     #[test]
     fn edit_uniforms_size_matches_wgsl() {
-        // Must be 432 bytes to match the WGSL EditUniforms struct layout.
+        // Must be 448 bytes to match the WGSL EditUniforms struct layout.
         // Phase 2A: 128 bytes. Phase 2B adds 6 × vec4<f32> = 96 bytes → 224.
         // Phase 2C adds 4 × vec4<f32> = 64 bytes → 288.
         // Phase 2D adds 1 × vec4<f32> = 16 bytes → 304.
@@ -253,10 +260,11 @@ mod tests {
         // Phase 2E.4 adds nr_luminance + nr_color + 2-f32 pad = 16 bytes → 400.
         // Phase 2E.5 adds dehaze + 3-f32 pad = 16 bytes → 416.
         // Phase 2E polish adds sharpening_detail + sharpening_masking + 2-f32 pad = 16 bytes → 432.
+        // v0.19.1 adds atmospheric_light vec4<f32> = 16 bytes → 448.
         // If this fails, check that the Rust and WGSL fields are in sync.
         assert_eq!(
             std::mem::size_of::<EditUniforms>(),
-            432,
+            448,
             "EditUniforms size mismatch — Rust and WGSL structs are out of sync"
         );
     }

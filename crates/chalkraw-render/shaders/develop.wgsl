@@ -78,7 +78,9 @@
 // 416   sharpening_detail  f32         0..100
 // 420   sharpening_masking f32         0..100
 // 424   _pad_sharp_dm      vec2<f32>
-// Total: 432 bytes.
+// v0.19.1 (Atmospheric Light for Dehaze): vec4<f32> = 16 bytes.
+// 432   atmospheric_light  vec4<f32>   .rgb = [r, g, b], .w = 0.0
+// Total: 448 bytes.
 
 struct EditUniforms {
     exposure:           f32,
@@ -150,6 +152,9 @@ struct EditUniforms {
     sharpening_detail:  f32,        // 0..100
     sharpening_masking: f32,        // 0..100
     _pad_sharp_dm:      vec2<f32>,
+    // v0.19.1: Per-image atmospheric light for Dehaze (offset 432..448).
+    // .rgb = estimated atmospheric light, .w = 0.0 (padding).
+    atmospheric_light:  vec4<f32>,
 };
 
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
@@ -465,9 +470,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
                 dark = min(dark, min(s.r, min(s.g, s.b)));
             }
         }
-        // Atmospheric light assumed white (0.95, 0.95, 0.95) — true DCP would pick the
-        // brightest dark-channel pixel over the whole image (requires a pre-pass).
-        let atmos = vec3<f32>(0.95);
+        // Per-image atmospheric light estimated on CPU (top 0.1% of dark-channel pixels).
+        // Falls back to (0.95, 0.95, 0.95) when the pipeline has no image loaded yet.
+        let atmos = edit.atmospheric_light.rgb;
         let omega = 0.85;
         let t_min = 0.1;
         let t = max(1.0 - omega * dark, t_min);

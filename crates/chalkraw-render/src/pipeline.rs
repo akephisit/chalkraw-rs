@@ -28,6 +28,9 @@ pub struct DevelopPipeline {
     /// (Bgra8UnormSrgb, Rgba8UnormSrgb) and linear-float formats
     /// (Rgba16Float, Rgba32Float) do not need it.
     pub manual_srgb_needed: bool,
+    /// Per-image atmospheric light for DCP Dehaze, estimated once at source
+    /// upload from the top 0.1% brightest dark-channel pixels.
+    pub atmospheric_light: [f32; 3],
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
 }
@@ -182,9 +185,18 @@ impl DevelopPipeline {
             sampler,
             uniform_buffer,
             manual_srgb_needed,
+            // Default to white until the caller sets a per-image estimate.
+            atmospheric_light: [0.95, 0.95, 0.95],
             device: rd.device.clone(),
             queue: rd.queue.clone(),
         }
+    }
+
+    /// Override the atmospheric light used by the Dehaze shader block.
+    /// Call once per source upload with the result of
+    /// `chalkraw_render::source::estimate_atmospheric_light`.
+    pub fn set_atmospheric_light(&mut self, atmos: [f32; 3]) {
+        self.atmospheric_light = atmos;
     }
 
     pub fn update_uniforms(&self, u: &EditUniforms) {
@@ -193,6 +205,12 @@ impl DevelopPipeline {
         let mut copy = *u;
         copy.srgb_output = if self.manual_srgb_needed { 1 } else { 0 };
         copy._pad_srgb = [0; 3];
+        copy.atmospheric_light = [
+            self.atmospheric_light[0],
+            self.atmospheric_light[1],
+            self.atmospheric_light[2],
+            0.0,
+        ];
         self.queue.write_buffer(&self.uniform_buffer, 0, bytes_of(&copy));
     }
 

@@ -117,9 +117,10 @@ pub fn export_current(
     let (out_w, out_h) = compute_output_size(image.width, image.height, options.resize);
 
     let source = SourceTexture::upload(rd, image.width, image.height, &image.pixels);
-    let pipeline = DevelopPipeline::new(rd, PipelineConfig {
+    let mut pipeline = DevelopPipeline::new(rd, PipelineConfig {
         output_format: wgpu::TextureFormat::Rgba8UnormSrgb,
     });
+    pipeline.set_atmospheric_light(chalkraw_render::source::estimate_atmospheric_light(&image.pixels, image.width, image.height));
     pipeline.update_uniforms(&EditUniforms::from(edit));
 
     // Run the Phase 2E blur passes and bilateral NR. These mirror what the UI canvas does
@@ -216,9 +217,10 @@ fn export_single_item(
     let (out_w, out_h) = compute_output_size(image.width, image.height, opts.resize);
 
     let source = SourceTexture::upload(rd, image.width, image.height, &image.pixels);
-    let pipeline = DevelopPipeline::new(rd, PipelineConfig {
+    let mut pipeline = DevelopPipeline::new(rd, PipelineConfig {
         output_format: wgpu::TextureFormat::Rgba8UnormSrgb,
     });
+    pipeline.set_atmospheric_light(chalkraw_render::source::estimate_atmospheric_light(&image.pixels, image.width, image.height));
     pipeline.update_uniforms(&EditUniforms::from(&item.edit));
 
     // Run Phase 2E blur passes and bilateral NR so Clarity, Texture, Sharpening, NR,
@@ -454,20 +456,85 @@ fn apply_watermark(
 
 // ── Rotation helper ───────────────────────────────────────────────────────────
 
-/// Rotate an RGBA image by the nearest multiple of 90°.
+/// Rotate an RGBA image by an arbitrary angle using bilinear sampling.
 ///
-/// Snaps `angle_deg` to the nearest 90° increment (0, 90, 180, 270) and applies
-/// the corresponding lossless `image::imageops` rotation.  Arbitrary-angle
-/// bilinear rotation is a follow-up (most watermarks are placed at axis-aligned
-/// angles anyway).
+/// For angles within 0.5° of a 90° multiple the fast lossless `image::imageops`
+/// path is taken.  All other angles use a bilinear-sampled affine transform that
+/// expands the canvas to the rotated bounding box and leaves transparent pixels
+/// where the original had no coverage.
 pub fn rotate_image(img: &image::RgbaImage, angle_deg: f32) -> image::RgbaImage {
+    if angle_deg.abs() < 0.1 { return img.clone(); }
     let snapped = ((angle_deg / 90.0).round() as i32).rem_euclid(4);
-    match snapped {
-        1 => image::imageops::rotate90(img),
-        2 => image::imageops::rotate180(img),
-        3 => image::imageops::rotate270(img),
-        _ => img.clone(),
+    // Snap to 90° if the requested angle is close enough — avoids unnecessary
+    // bilinear sampling for the common axis-aligned case.
+    if (angle_deg - (snapped as f32 * 90.0)).abs() < 0.5 {
+        return match snapped {
+            1 => image::imageops::rotate90(img),
+            2 => image::imageops::rotate180(img),
+            3 => image::imageops::rotate270(img),
+            _ => img.clone(),
+        };
     }
+
+    // General case: bilinear sample of rotated coordinates.
+    let (w, h) = img.dimensions();
+    let theta = angle_deg.to_radians();
+    let cos_t = theta.cos();
+    let sin_t = theta.sin();
+
+    // Bounding box of the rotated image.
+    let (cx, cy) = (w as f32 * 0.5, h as f32 * 0.5);
+    let corners = [
+        ( 0.0 - cx,  0.0 - cy),
+        (w as f32 - cx, 0.0 - cy),
+        ( 0.0 - cx, h as f32 - cy),
+        (w as f32 - cx, h as f32 - cy),
+    ];
+    let mut min_x = f32::MAX; let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN; let mut max_y = f32::MIN;
+    for (x, y) in corners {
+        let rx = x * cos_t - y * sin_t;
+        let ry = x * sin_t + y * cos_t;
+        if rx < min_x { min_x = rx; }
+        if ry < min_y { min_y = ry; }
+        if rx > max_x { max_x = rx; }
+        if ry > max_y { max_y = ry; }
+    }
+    let out_w = (max_x - min_x).ceil() as u32;
+    let out_h = (max_y - min_y).ceil() as u32;
+    let mut out = image::ImageBuffer::from_pixel(out_w, out_h, image::Rgba([0, 0, 0, 0]));
+
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            // Map output (ox, oy) back to source coordinates by inverse rotation.
+            let cx2 = ox as f32 + min_x;
+            let cy2 = oy as f32 + min_y;
+            let sx = cx2 * cos_t + cy2 * sin_t + cx;
+            let sy = -cx2 * sin_t + cy2 * cos_t + cy;
+            if sx < 0.0 || sy < 0.0 || sx >= (w - 1) as f32 || sy >= (h - 1) as f32 { continue; }
+            // Bilinear sample.
+            let x0 = sx.floor() as u32;
+            let y0 = sy.floor() as u32;
+            let x1 = x0 + 1;
+            let y1 = y0 + 1;
+            let fx = sx - x0 as f32;
+            let fy = sy - y0 as f32;
+            let p00 = img.get_pixel(x0, y0);
+            let p10 = img.get_pixel(x1, y0);
+            let p01 = img.get_pixel(x0, y1);
+            let p11 = img.get_pixel(x1, y1);
+            let mut blended = [0.0_f32; 4];
+            for c in 0..4 {
+                let top = p00[c] as f32 * (1.0 - fx) + p10[c] as f32 * fx;
+                let bot = p01[c] as f32 * (1.0 - fx) + p11[c] as f32 * fx;
+                blended[c] = top * (1.0 - fy) + bot * fy;
+            }
+            out.put_pixel(ox, oy, image::Rgba([
+                blended[0] as u8, blended[1] as u8, blended[2] as u8, blended[3] as u8,
+            ]));
+        }
+    }
+    out
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -573,5 +640,15 @@ mod tests {
         // date is YYYY-MM-DD
         assert!(name.contains('-'), "expected date in name: {name}");
         assert!(name.ends_with(".png"), "got: {name}");
+    }
+
+    #[test]
+    fn rotate_image_45_produces_larger_bounding_box() {
+        let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(10, 10, image::Rgba([255, 255, 255, 255]));
+        let rotated = super::rotate_image(&img, 45.0);
+        let (w, h) = rotated.dimensions();
+        // sqrt(2) * 10 ≈ 14.14
+        assert!((14..=16).contains(&w));
+        assert!((14..=16).contains(&h));
     }
 }

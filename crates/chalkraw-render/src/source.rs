@@ -56,6 +56,34 @@ impl SourceTexture {
     }
 }
 
+/// Estimate the atmospheric light for DCP Dehaze from a linear RGBA pixel buffer.
+///
+/// Returns `[r, g, b]` as the average of the top 0.1% of pixels (by dark-channel
+/// value — i.e. min(R, G, B)), which approximates the scene's global illumination.
+/// This is computed once per source upload and passed to the shader as a uniform.
+pub fn estimate_atmospheric_light(pixels: &[f32], width: u32, height: u32) -> [f32; 3] {
+    // Compute dark channel per pixel: min(R, G, B). Take the top 0.1% brightest
+    // of these as the atmospheric light estimate.
+    let count = (width * height) as usize;
+    let mut dark = Vec::with_capacity(count);
+    for i in 0..count {
+        let r = pixels[i * 4];
+        let g = pixels[i * 4 + 1];
+        let b = pixels[i * 4 + 2];
+        dark.push((r.min(g).min(b), i));
+    }
+    // Sort by dark channel value descending — brightest dark-channel pixels first.
+    dark.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let top_count = (count / 1000).max(1).min(count);
+    let mut sum = [0.0_f32; 3];
+    for &(_, i) in &dark[..top_count] {
+        sum[0] += pixels[i * 4];
+        sum[1] += pixels[i * 4 + 1];
+        sum[2] += pixels[i * 4 + 2];
+    }
+    [sum[0] / top_count as f32, sum[1] / top_count as f32, sum[2] / top_count as f32]
+}
+
 /// IEEE-754 binary32 → binary16 (round-to-nearest-even).
 fn f32_to_f16_bits(v: f32) -> u16 {
     let bits = v.to_bits();
@@ -109,6 +137,26 @@ mod tests {
         let src = SourceTexture::upload(&rd, w, h, &pixels);
         assert_eq!(src.width, 4);
         assert_eq!(src.height, 4);
+    }
+
+    #[test]
+    fn estimate_atmospheric_light_finds_bright_region() {
+        let w = 10u32; let h = 10u32;
+        // Mostly dark with a small bright corner.
+        let mut pixels = vec![0.1_f32; (w * h * 4) as usize];
+        // Set top-left 2x2 to bright white.
+        for y in 0..2 {
+            for x in 0..2 {
+                let i = (y * w + x) * 4;
+                pixels[i as usize] = 0.95;
+                pixels[i as usize + 1] = 0.95;
+                pixels[i as usize + 2] = 0.95;
+                pixels[i as usize + 3] = 1.0;
+            }
+        }
+        let atmos = super::estimate_atmospheric_light(&pixels, w, h);
+        // top 0.1% of 100 = 1 pixel, the brightest dark-channel pixel. Should be the bright region.
+        assert!(atmos[0] > 0.5);
     }
 
     #[test]

@@ -58,7 +58,9 @@ pub struct CanvasGpu {
 impl CanvasGpu {
     pub fn new(rd: &RenderDevice, img: &LinearImage, output_format: ewgpu::TextureFormat) -> Self {
         let source = SourceTexture::upload(rd, img.width, img.height, &img.pixels);
-        let pipeline = DevelopPipeline::new(rd, PipelineConfig { output_format });
+        let mut pipeline = DevelopPipeline::new(rd, PipelineConfig { output_format });
+        let atmos = chalkraw_render::source::estimate_atmospheric_light(&img.pixels, img.width, img.height);
+        pipeline.set_atmospheric_light(atmos);
         let blur_pipeline = BlurPipeline::new(rd);
         let bilateral_pipeline = BilateralPipeline::new(rd);
         let (clarity_tex_a, clarity_view_a, clarity_tex_b, clarity_view_b) =

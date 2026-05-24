@@ -26,6 +26,8 @@ pub struct AppState {
     pub dirty_since: Option<Instant>,
     pub new_preset_name: String,
     pub folder_filter: Option<std::path::PathBuf>,
+    pub watch_folder: Option<std::path::PathBuf>,
+    pub last_watch_scan: Option<std::time::Instant>,
 }
 
 impl AppState {
@@ -75,6 +77,8 @@ impl AppState {
             dirty_since: None,
             new_preset_name: String::new(),
             folder_filter: None,
+            watch_folder: None,
+            last_watch_scan: None,
         })
     }
 
@@ -180,6 +184,25 @@ impl AppState {
 
     pub fn delete_preset(&self, id: chalkraw_core::PresetId) -> anyhow::Result<()> {
         self.catalog.delete_preset(id).map_err(Into::into)
+    }
+
+    pub fn poll_watch_folder(&mut self) {
+        let Some(dir) = self.watch_folder.clone() else { return };
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_watch_scan {
+            if now.duration_since(last).as_secs() < 5 { return; }
+        }
+        self.last_watch_scan = Some(now);
+        let extensions = ["jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef", "arw", "raf", "pef", "orf"];
+        let mut paths = Vec::new();
+        walk_dir(&dir, &extensions, &mut paths);
+        if !paths.is_empty() {
+            match self.import_files(&paths) {
+                Ok(n) if n > 0 => log::info!("watch folder: imported {n} new photos"),
+                Ok(_) => {}, // no new (all dedup'd)
+                Err(e) => log::warn!("watch folder import failed: {e}"),
+            }
+        }
     }
 
     /// Navigate to the next (+1) or previous (−1) photo in the catalog.
@@ -590,6 +613,7 @@ pub(crate) fn walk_dir(dir: &std::path::Path, extensions: &[&str], out: &mut Vec
 
 impl eframe::App for ChalkrawApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.state.poll_watch_folder();
         self.ensure_gpu(frame);
 
         let mut to_set: Option<Flag> = None;
@@ -667,6 +691,19 @@ impl eframe::App for ChalkrawApp {
                             }
                             self.thumb_textures.clear();
                         }
+                    }
+                    if ui.button("Watch Folder…").clicked() {
+                        ui.close();
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            self.state.watch_folder = Some(dir);
+                            self.state.last_watch_scan = None;  // force scan on next frame
+                            log::info!("watching folder: {:?}", self.state.watch_folder);
+                        }
+                    }
+                    if self.state.watch_folder.is_some()
+                        && ui.button("Stop Watching").clicked() {
+                        ui.close();
+                        self.state.watch_folder = None;
                     }
                     if ui.button("Batch Export…").clicked() {
                         ui.close();
@@ -1281,6 +1318,10 @@ impl eframe::App for ChalkrawApp {
                                             ui.label("Margin (% long edge):");
                                             ui.add(egui::Slider::new(&mut img.margin_pct, 0.0..=20.0).fixed_decimals(0));
                                         });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Rotation");
+                                            ui.add(egui::Slider::new(&mut img.rotation_deg, -180.0..=180.0).fixed_decimals(0).suffix("°"));
+                                        });
                                         if ui.button("Remove layer").clicked() {
                                             remove_layer = Some(idx);
                                         }
@@ -1353,6 +1394,10 @@ impl eframe::App for ChalkrawApp {
                                             ui.label("Margin (% long edge):");
                                             ui.add(egui::Slider::new(&mut txt.margin_pct, 0.0..=20.0).fixed_decimals(0));
                                         });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Rotation");
+                                            ui.add(egui::Slider::new(&mut txt.rotation_deg, -180.0..=180.0).fixed_decimals(0).suffix("°"));
+                                        });
                                         if ui.button("Remove layer").clicked() {
                                             remove_layer = Some(idx);
                                         }
@@ -1420,6 +1465,11 @@ impl eframe::App for ChalkrawApp {
                 self.watermark_preview_textures.clear();
                 self.watermark_editor = None;
             }
+        }
+
+        // Keep the watch-folder poll alive when the app is idle.
+        if self.state.watch_folder.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_secs(5));
         }
 
         // Debounced autosave.
