@@ -23,8 +23,8 @@ fn render_solid(rd: &RenderDevice, w: u32, h: u32, pixels: Vec<f32>, edit: &Edit
     let src = SourceTexture::upload(rd, w, h, &pixels);
     let pipe = DevelopPipeline::new(rd, PipelineConfig::default());
     pipe.update_uniforms(&EditUniforms::from(edit));
-    // Tests that don't exercise Clarity/Sharpening/Texture pass source.view for all blur views.
-    let bg = pipe.make_bind_group(&src, &src.view, &src.view, &src.view);
+    // Tests that don't exercise Clarity/Sharpening/Texture/NR pass source.view for all blur views.
+    let bg = pipe.make_bind_group(&src, &src.view, &src.view, &src.view, &src.view);
     let (tex, view) = make_target(rd, w, h);
     pipe.render(&view, &bg);
     read_to_cpu(rd, &tex, w, h).unwrap()
@@ -474,8 +474,8 @@ fn manual_srgb_encoding_matches_hardware_encoding() {
     });
     pipe_hw.update_uniforms(&EditUniforms::from(&edit));
     let src_hw = SourceTexture::upload(&rd, w, h, &pixels);
-    // Pass source.view for all blur views (Clarity/Sharpening/Texture not exercised).
-    let bg_hw = pipe_hw.make_bind_group(&src_hw, &src_hw.view, &src_hw.view, &src_hw.view);
+    // Pass source.view for all blur views (Clarity/Sharpening/Texture/NR not exercised).
+    let bg_hw = pipe_hw.make_bind_group(&src_hw, &src_hw.view, &src_hw.view, &src_hw.view, &src_hw.view);
     let (tex_hw, view_hw) = make_target(&rd, w, h);
     pipe_hw.render(&view_hw, &bg_hw);
     let out_hw = read_to_cpu(&rd, &tex_hw, w, h).unwrap();
@@ -489,7 +489,7 @@ fn manual_srgb_encoding_matches_hardware_encoding() {
 
     pipe_sw.update_uniforms(&EditUniforms::from(&edit));
     let src_sw = SourceTexture::upload(&rd, w, h, &pixels);
-    let bg_sw = pipe_sw.make_bind_group(&src_sw, &src_sw.view, &src_sw.view, &src_sw.view);
+    let bg_sw = pipe_sw.make_bind_group(&src_sw, &src_sw.view, &src_sw.view, &src_sw.view, &src_sw.view);
 
     // Create a non-sRGB render target manually (make_target always uses Rgba8UnormSrgb).
     let target_sw = rd.device.create_texture(&wgpu::TextureDescriptor {
@@ -579,8 +579,8 @@ fn sharpening_amount_100_changes_high_freq_edges() {
     blur.render_pass(&sharp_a, &sharp_b, w, h, false, 1.5);
 
     let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
-    // Pass source.view for texture_blur (not exercised in this sharpening test).
-    let bind = pipe.make_bind_group(&source, &clar_b, &sharp_b, &source.view);
+    // Pass source.view for texture_blur and nr_blur (not exercised in this sharpening test).
+    let bind = pipe.make_bind_group(&source, &clar_b, &sharp_b, &source.view, &source.view);
 
     // Render with sharpening amount = 100.
     let mut edit = EditState::default();
@@ -637,8 +637,8 @@ fn clarity_plus_50_increases_contrast_on_textured_image() {
     blur.render_pass(&blur_view_a, &blur_view_b, w, h, false, 8.0);
 
     let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
-    // Pass source.view for sharpening and texture blurs (not exercised in this test).
-    let bind = pipe.make_bind_group(&source, &blur_view_b, &source.view, &source.view);
+    // Pass source.view for sharpening, texture, and NR blurs (not exercised in this test).
+    let bind = pipe.make_bind_group(&source, &blur_view_b, &source.view, &source.view, &source.view);
 
     // Render with clarity = 50.
     let mut edit = EditState::default();
@@ -701,7 +701,8 @@ fn texture_amount_50_changes_mid_freq_pattern() {
     blur.render_pass(&t_a, &t_b, w, h, false, 5.0);
 
     let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
-    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b);
+    // Pass source.view for NR blur (not exercised in this texture test).
+    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b, &source.view);
 
     let mut edit = EditState::default();
     edit.presence.texture = 50.0;
@@ -724,5 +725,84 @@ fn texture_amount_50_changes_mid_freq_pattern() {
     assert!(
         total_diff > 50,
         "texture should produce visible difference, got {total_diff}"
+    );
+}
+
+// ── Phase 2E.4: Noise Reduction ───────────────────────────────────────────────
+
+/// NR luminance=100 on a noisy grey source should reduce pixel-to-pixel variance,
+/// because the Gaussian blur used as the NR source smooths the noise.
+#[test]
+fn nr_luminance_100_smooths_noisy_source() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skip: no GPU"); return; }
+    };
+    let w: u32 = 32;
+    let h: u32 = 32;
+    // Deterministic noise pattern around 0.5 grey using a multiplicative hash.
+    let pixels: Vec<f32> = (0..w * h).flat_map(|i: u32| {
+        let mut x = i.wrapping_mul(2654435761);
+        x ^= x >> 16;
+        x = x.wrapping_mul(2246822507);
+        x ^= x >> 13;
+        let n = (x as f32 / u32::MAX as f32 - 0.5) * 0.4;
+        let v = (0.5 + n).clamp(0.0, 1.0);
+        [v, v, v, 1.0]
+    }).collect();
+
+    let source = SourceTexture::upload(&rd, w, h, &pixels);
+    let blur = BlurPipeline::new(&rd);
+    let (_, c_a, _, c_b) = create_pingpong(&rd, w, h);
+    let (_, s_a, _, s_b) = create_pingpong(&rd, w, h);
+    let (_, t_a, _, t_b) = create_pingpong(&rd, w, h);
+    let (_, n_a, _, n_b) = create_pingpong(&rd, w, h);
+    blur.render_pass(&source.view, &c_a, w, h, true, 16.0);
+    blur.render_pass(&c_a, &c_b, w, h, false, 16.0);
+    blur.render_pass(&source.view, &s_a, w, h, true, 1.5);
+    blur.render_pass(&s_a, &s_b, w, h, false, 1.5);
+    blur.render_pass(&source.view, &t_a, w, h, true, 5.0);
+    blur.render_pass(&t_a, &t_b, w, h, false, 5.0);
+    blur.render_pass(&source.view, &n_a, w, h, true, 2.0);
+    blur.render_pass(&n_a, &n_b, w, h, false, 2.0);
+
+    let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
+    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b, &n_b);
+
+    // Render with NR luminance = 0 (off).
+    let edit_off = EditState::default();
+    pipe.update_uniforms(&EditUniforms::from(&edit_off));
+    let (tex_off, view_off) = make_target(&rd, w, h);
+    pipe.render(&view_off, &bind);
+    let pixels_off = read_to_cpu(&rd, &tex_off, w, h).unwrap();
+
+    // Render with NR luminance = 100 (full smoothing).
+    let mut edit_on = EditState::default();
+    edit_on.detail.noise_reduction.luminance = 100.0;
+    pipe.update_uniforms(&EditUniforms::from(&edit_on));
+    let (tex_on, view_on) = make_target(&rd, w, h);
+    pipe.render(&view_on, &bind);
+    let pixels_on = read_to_cpu(&rd, &tex_on, w, h).unwrap();
+
+    fn variance(pixels: &[u8], w: u32, h: u32) -> f32 {
+        let mut sum = 0.0_f32;
+        let count = (w * h) as f32;
+        for i in 0..(w * h) {
+            sum += pixels[(i * 4) as usize] as f32;
+        }
+        let mean = sum / count;
+        let mut var = 0.0_f32;
+        for i in 0..(w * h) {
+            let d = pixels[(i * 4) as usize] as f32 - mean;
+            var += d * d;
+        }
+        var / count
+    }
+
+    let var_off = variance(&pixels_off, w, h);
+    let var_on  = variance(&pixels_on,  w, h);
+    assert!(
+        var_on < var_off * 0.8,
+        "NR luminance=100 should reduce variance by at least 20%: off={var_off:.2} on={var_on:.2}"
     );
 }

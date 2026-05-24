@@ -68,7 +68,11 @@
 // 368   sharpening_amount  f32
 // 372   sharpening_radius  f32
 // 376   _pad_sharp         vec2<f32>
-// Total: 384 bytes.
+// Phase 2E.4 (Noise Reduction): 2 × f32 + vec2<f32> pad = 16 bytes.
+// 384   nr_luminance       f32
+// 388   nr_color           f32
+// 392   _pad_nr            vec2<f32>
+// Total: 400 bytes.
 
 struct EditUniforms {
     exposure:           f32,
@@ -128,6 +132,10 @@ struct EditUniforms {
     sharpening_amount:  f32,
     sharpening_radius:  f32,
     _pad_sharp:         vec2<f32>,
+    // Phase 2E.4: Noise Reduction (offset 384..400).
+    nr_luminance:       f32,
+    nr_color:           f32,
+    _pad_nr:            vec2<f32>,
 };
 
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
@@ -139,6 +147,14 @@ struct EditUniforms {
 @group(0) @binding(4) var sharp_blur_tex: texture_2d<f32>;
 // Phase 2E.3: mid-sigma pre-blurred source for Texture local-contrast.
 @group(0) @binding(5) var texture_blur_tex: texture_2d<f32>;
+// Phase 2E.4: small-sigma pre-blurred source for Noise Reduction (sigma=2px).
+@group(0) @binding(6) var nr_blur_tex: texture_2d<f32>;
+
+// ── Luma helper (BT.601 coefficients) ────────────────────────────────────────
+// Used by the Phase 2E.4 Noise Reduction pass to split luminance from chroma.
+fn rgb_to_y(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.299, 0.587, 0.114));
+}
 
 // ── HSV conversion helpers (Sam Hocevar's branchless algorithm) ───────────────
 
@@ -247,6 +263,26 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let sample = textureSample(source_tex, source_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)));
     var rgb = sample.rgb;
     let a = sample.a;
+
+    // Phase 2E.4: Noise Reduction (Gaussian-based v1; bilateral filter to come later).
+    // Applied before WB/tone/colour so subsequent edits don't amplify noise.
+    // Luminance: blend Y channel toward blurred Y based on nr_luminance (0..100).
+    // Colour: blend chroma channels toward blurred chroma based on nr_color (0..100).
+    {
+        let nr_blur = textureSample(nr_blur_tex, source_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0))).rgb;
+        let nr_lum_amt = edit.nr_luminance / 100.0;
+        let nr_col_amt = edit.nr_color / 100.0;
+
+        // Split into luminance + chroma using BT.601 luma.
+        let y_orig = rgb_to_y(rgb);
+        let y_blur = rgb_to_y(nr_blur);
+        let chroma_orig = rgb - vec3<f32>(y_orig);
+        let chroma_blur = nr_blur - vec3<f32>(y_blur);
+
+        let y_mixed = mix(y_orig, y_blur, nr_lum_amt);
+        let chroma_mixed = mix(chroma_orig, chroma_blur, nr_col_amt);
+        rgb = vec3<f32>(y_mixed) + chroma_mixed;
+    }
 
     // 1. White Balance — simple per-channel temperature/tint multipliers.
     //    delta_k ≈ [-0.7, 0.7] across the typical 2000–10000 K range.

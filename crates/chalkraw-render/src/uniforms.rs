@@ -64,7 +64,11 @@ use chalkraw_core::EditState;
 /// 368  sharpening_amount f32
 /// 372  sharpening_radius f32
 /// 376  _pad_sharp        [f32;2]
-/// Total: 384 bytes
+/// Phase 2E.4 (Noise Reduction): luminance + color + 2-float pad = 16 bytes.
+/// 384  nr_luminance      f32
+/// 388  nr_color          f32
+/// 392  _pad_nr           [f32;2]
+/// Total: 400 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct EditUniforms {
@@ -129,6 +133,10 @@ pub struct EditUniforms {
     pub sharpening_amount: f32,     // offset 368
     pub sharpening_radius: f32,     // offset 372
     pub _pad_sharp: [f32; 2],       // offset 376  → pads to 384
+    // Phase 2E.4: Noise Reduction (Gaussian-based v1).
+    pub nr_luminance: f32,          // offset 384  0..100 — strength of luminance smoothing mix
+    pub nr_color: f32,              // offset 388  0..100 — strength of chroma smoothing mix
+    pub _pad_nr: [f32; 2],          // offset 392  → pads to 400
 }
 
 impl From<&EditState> for EditUniforms {
@@ -200,6 +208,10 @@ impl From<&EditState> for EditUniforms {
             sharpening_amount: e.detail.sharpening.amount,
             sharpening_radius: e.detail.sharpening.radius,
             _pad_sharp: [0.0; 2],
+            // Phase 2E.4: Noise Reduction.
+            nr_luminance: e.detail.noise_reduction.luminance,
+            nr_color: e.detail.noise_reduction.color,
+            _pad_nr: [0.0; 2],
         }
     }
 }
@@ -210,17 +222,18 @@ mod tests {
 
     #[test]
     fn edit_uniforms_size_matches_wgsl() {
-        // Must be 384 bytes to match the WGSL EditUniforms struct layout.
+        // Must be 400 bytes to match the WGSL EditUniforms struct layout.
         // Phase 2A: 128 bytes. Phase 2B adds 6 × vec4<f32> = 96 bytes → 224.
         // Phase 2C adds 4 × vec4<f32> = 64 bytes → 288.
         // Phase 2D adds 1 × vec4<f32> = 16 bytes → 304.
         // Phase 2F adds lens (16 bytes) + crop (32 bytes) = 48 bytes → 352.
         // Phase 0.13.2 adds srgb_output (u32) + 3-u32 pad = 16 bytes → 368.
         // Phase 2E.2 adds sharpening_amount + sharpening_radius + 2-f32 pad = 16 bytes → 384.
+        // Phase 2E.4 adds nr_luminance + nr_color + 2-f32 pad = 16 bytes → 400.
         // If this fails, check that the Rust and WGSL fields are in sync.
         assert_eq!(
             std::mem::size_of::<EditUniforms>(),
-            384,
+            400,
             "EditUniforms size mismatch — Rust and WGSL structs are out of sync"
         );
     }

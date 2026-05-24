@@ -312,10 +312,10 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
             ui.add_enabled(false, egui::Slider::new(&mut edit.detail.sharpening.masking, 0.0..=100.0));
             ui.add_space(4.0);
             ui.strong("Noise Reduction");
-            ui.label("Luminance (Phase 2E.4)");
-            ui.add_enabled(false, egui::Slider::new(&mut edit.detail.noise_reduction.luminance, 0.0..=100.0));
-            ui.label("Color (Phase 2E.4)");
-            ui.add_enabled(false, egui::Slider::new(&mut edit.detail.noise_reduction.color, 0.0..=100.0));
+            ui.label("Noise Reduction Luminance");
+            if ui.add(egui::Slider::new(&mut edit.detail.noise_reduction.luminance, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+            ui.label("Noise Reduction Color");
+            if ui.add(egui::Slider::new(&mut edit.detail.noise_reduction.color, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
         });
 
     // ── Effects ───────────────────────────────────────────────────────────────

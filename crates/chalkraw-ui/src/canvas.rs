@@ -42,6 +42,13 @@ pub struct CanvasGpu {
     #[allow(dead_code)]
     pub texture_tex_b: ewgpu::Texture,
     pub texture_view_b: ewgpu::TextureView,
+    /// NR blur ping-pong — small fixed sigma (2 px), used for Noise Reduction (Phase 2E.4).
+    #[allow(dead_code)]
+    pub nr_tex_a: ewgpu::Texture,
+    pub nr_view_a: ewgpu::TextureView,
+    #[allow(dead_code)]
+    pub nr_tex_b: ewgpu::Texture,
+    pub nr_view_b: ewgpu::TextureView,
     pub bind_group: ewgpu::BindGroup,
 }
 
@@ -56,8 +63,10 @@ impl CanvasGpu {
             create_pingpong(rd, img.width, img.height);
         let (texture_tex_a, texture_view_a, texture_tex_b, texture_view_b) =
             create_pingpong(rd, img.width, img.height);
+        let (nr_tex_a, nr_view_a, nr_tex_b, nr_view_b) =
+            create_pingpong(rd, img.width, img.height);
         // Build the develop bind group pointing at the final blur result textures.
-        let bind_group = pipeline.make_bind_group(&source, &clarity_view_b, &sharp_view_b, &texture_view_b);
+        let bind_group = pipeline.make_bind_group(&source, &clarity_view_b, &sharp_view_b, &texture_view_b, &nr_view_b);
         let me = Self {
             source,
             pipeline,
@@ -74,20 +83,25 @@ impl CanvasGpu {
             texture_view_a,
             texture_tex_b,
             texture_view_b,
+            nr_tex_a,
+            nr_view_a,
+            nr_tex_b,
+            nr_view_b,
             bind_group,
         };
         // Run initial blurs at image-load time.
         // Clarity uses sigma=16 px (large); Sharpening default radius=1.0 px (small);
-        // Texture uses sigma=5 px (mid-frequency).
-        me.run_blurs(16.0, 1.0, 5.0);
+        // Texture uses sigma=5 px (mid-frequency); NR uses fixed sigma=2 px.
+        me.run_blurs(16.0, 1.0, 5.0, 2.0);
         me
     }
 
-    /// Run three two-pass separable Gaussian blurs.
+    /// Run four two-pass separable Gaussian blurs.
     /// Clarity:    source → clarity_view_a (H) → clarity_view_b (V).
     /// Sharpening: source → sharp_view_a   (H) → sharp_view_b   (V).
     /// Texture:    source → texture_view_a (H) → texture_view_b (V).
-    pub fn run_blurs(&self, clarity_sigma: f32, sharp_sigma: f32, texture_sigma: f32) {
+    /// NR:         source → nr_view_a      (H) → nr_view_b      (V).
+    pub fn run_blurs(&self, clarity_sigma: f32, sharp_sigma: f32, texture_sigma: f32, nr_sigma: f32) {
         // Clarity blur (large sigma).
         self.blur_pipeline.render_pass(
             &self.source.view,
@@ -138,6 +152,23 @@ impl CanvasGpu {
             self.source.height,
             false,
             texture_sigma,
+        );
+        // NR blur (small fixed sigma=2px).
+        self.blur_pipeline.render_pass(
+            &self.source.view,
+            &self.nr_view_a,
+            self.source.width,
+            self.source.height,
+            true,
+            nr_sigma,
+        );
+        self.blur_pipeline.render_pass(
+            &self.nr_view_a,
+            &self.nr_view_b,
+            self.source.width,
+            self.source.height,
+            false,
+            nr_sigma,
         );
     }
 
