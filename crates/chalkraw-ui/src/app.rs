@@ -604,7 +604,7 @@ impl eframe::App for ChalkrawApp {
                     if ui.button("Open Photo…").clicked() {
                         ui.close();
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff"])
+                            .add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef", "arw", "raf", "pef", "orf"])
                             .pick_file()
                         {
                             if let Err(e) = self.state.switch_to_path(path) {
@@ -618,7 +618,7 @@ impl eframe::App for ChalkrawApp {
                     if ui.button("Import Photos…").clicked() {
                         ui.close();
                         if let Some(paths) = rfd::FileDialog::new()
-                            .add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff"])
+                            .add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef", "arw", "raf", "pef", "orf"])
                             .pick_files()
                         {
                             match self.state.import_files(&paths) {

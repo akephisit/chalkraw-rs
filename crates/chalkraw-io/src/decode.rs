@@ -22,6 +22,186 @@ impl LinearImage {
     }
 }
 
+// ── RAW format helpers ─────────────────────────────────────────────────────────
+
+/// Return a `RawFormat` if `path`'s extension matches a known RAW extension.
+/// Case-insensitive (e.g. `.CR2`, `.nef`, `.Arw` all work).
+pub(crate) fn raw_format_from_extension(path: &Path) -> Option<chalkraw_core::RawFormat> {
+    let ext = path.extension()?.to_str()?.to_lowercase();
+    match ext.as_str() {
+        "cr2" => Some(chalkraw_core::RawFormat::CanonCr2),
+        "cr3" => Some(chalkraw_core::RawFormat::CanonCr3),
+        "nef" => Some(chalkraw_core::RawFormat::NikonNef),
+        "arw" => Some(chalkraw_core::RawFormat::SonyArw),
+        "raf" => Some(chalkraw_core::RawFormat::FujiRaf),
+        "pef" => Some(chalkraw_core::RawFormat::PentaxPef),
+        "orf" => Some(chalkraw_core::RawFormat::OlympusOrf),
+        _ => None,
+    }
+}
+
+/// Scan `bytes` for embedded JPEG streams (SOI = 0xFFD8 0xFF, EOI = 0xFFD9).
+/// Returns the *largest* JPEG found, which is almost always the full-sized
+/// camera preview rather than a small thumbnail.
+pub(crate) fn find_embedded_jpeg(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut candidates: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i + 4 < bytes.len() {
+        if bytes[i] == 0xFF && bytes[i + 1] == 0xD8 && bytes[i + 2] == 0xFF {
+            // Possible SOI — scan forward for the matching EOI marker.
+            let mut j = i + 2;
+            while j + 1 < bytes.len() {
+                if bytes[j] == 0xFF && bytes[j + 1] == 0xD9 {
+                    candidates.push((i, j + 2));
+                    break;
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    // Pick the largest candidate.
+    candidates
+        .into_iter()
+        .max_by_key(|(start, end)| end - start)
+        .map(|(start, end)| bytes[start..end].to_vec())
+}
+
+/// Decode a RAW file via rawloader.
+///
+/// Strategy (v1): extract the camera's embedded JPEG preview, which most
+/// modern cameras include at full resolution as a fast-load convenience.
+/// This is an 8-bit sRGB image with the camera's own tone/colour rendering
+/// baked in — it is NOT a high-bit-depth linear decode, but it is
+/// immediately viewable and editable.
+///
+/// If no usable JPEG preview is found, falls back to a half-resolution
+/// greyscale demosaic using 2×2 Bayer cell averaging.  This is intentionally
+/// crude; it ensures the function always returns *something* rather than
+/// returning an error on cameras whose RAW containers carry no preview.
+fn decode_raw(path: PathBuf, raw_format: chalkraw_core::RawFormat) -> Result<LinearImage, IoError> {
+    // Open the file once to give rawloader a chance to validate it, and
+    // again to read the raw bytes for JPEG scanning.
+    {
+        let file = std::fs::File::open(&path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => IoError::NotFound(path.clone()),
+            _ => IoError::Io(e),
+        })?;
+        let mut reader = std::io::BufReader::new(file);
+        // We attempt to decode to confirm rawloader recognises the format.
+        // If it fails we still attempt the JPEG-scan fallback below.
+        let _ = rawloader::decode(&mut reader);
+    }
+
+    // Read the full file into memory for JPEG scanning.
+    let bytes = std::fs::read(&path)?;
+
+    if let Some(jpeg_bytes) = find_embedded_jpeg(&bytes) {
+        // Decode the embedded JPEG preview.
+        match decode_image_bytes(&jpeg_bytes) {
+            Ok(linear) => {
+                return Ok(LinearImage {
+                    format: chalkraw_core::ImageFormat::Raw(raw_format),
+                    ..linear
+                });
+            }
+            Err(e) => {
+                log::warn!("embedded JPEG decode failed for {path:?}: {e}; trying rawloader demosaic");
+            }
+        }
+    }
+
+    // No usable JPEG preview — fall back to a half-resolution demosaic via
+    // rawloader's Bayer data.
+    let file2 = std::fs::File::open(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => IoError::NotFound(path.clone()),
+        _ => IoError::Io(e),
+    })?;
+    let mut reader2 = std::io::BufReader::new(file2);
+    let raw = rawloader::decode(&mut reader2).map_err(|_| IoError::DecodeFailed {
+        path: path.clone(),
+        source: image::ImageError::Limits(image::error::LimitError::from_kind(
+            image::error::LimitErrorKind::DimensionError,
+        )),
+    })?;
+
+    simple_half_res_demosaic(&raw, raw_format, &path)
+}
+
+/// Half-resolution greyscale demosaic: average each 2×2 Bayer cell into one
+/// pixel.  Not colour-correct, but produces a usable image that at least
+/// shows the scene content when no JPEG preview is available.
+fn simple_half_res_demosaic(
+    raw: &rawloader::RawImage,
+    raw_format: chalkraw_core::RawFormat,
+    path: &Path,
+) -> Result<LinearImage, IoError> {
+    let w = raw.width;
+    let h = raw.height;
+    if w < 2 || h < 2 {
+        return Err(IoError::DecodeFailed {
+            path: path.to_path_buf(),
+            source: image::ImageError::Limits(image::error::LimitError::from_kind(
+                image::error::LimitErrorKind::DimensionError,
+            )),
+        });
+    }
+    let half_w = (w / 2) as u32;
+    let half_h = (h / 2) as u32;
+    let mut pixels = Vec::with_capacity((half_w * half_h * 4) as usize);
+
+    match &raw.data {
+        rawloader::RawImageData::Integer(data) => {
+            let max = raw.whitelevels.iter().copied().max().unwrap_or(16383) as f32;
+            for y in 0..half_h as usize {
+                for x in 0..half_w as usize {
+                    let sx = x * 2;
+                    let sy = y * 2;
+                    let i0 = sy * w + sx;
+                    let i1 = i0 + 1;
+                    let i2 = i0 + w;
+                    let i3 = i2 + 1;
+                    let avg = (data[i0] as f32
+                        + data[i1] as f32
+                        + data[i2] as f32
+                        + data[i3] as f32)
+                        / 4.0;
+                    let n = (avg / max).clamp(0.0, 1.0);
+                    pixels.push(n);
+                    pixels.push(n);
+                    pixels.push(n);
+                    pixels.push(1.0);
+                }
+            }
+        }
+        rawloader::RawImageData::Float(data) => {
+            for y in 0..half_h as usize {
+                for x in 0..half_w as usize {
+                    let sx = x * 2;
+                    let sy = y * 2;
+                    let i0 = sy * w + sx;
+                    let i1 = i0 + 1;
+                    let i2 = i0 + w;
+                    let i3 = i2 + 1;
+                    let avg = (data[i0] + data[i1] + data[i2] + data[i3]) / 4.0;
+                    let n = avg.clamp(0.0, 1.0);
+                    pixels.push(n);
+                    pixels.push(n);
+                    pixels.push(n);
+                    pixels.push(1.0);
+                }
+            }
+        }
+    }
+
+    Ok(LinearImage {
+        width: half_w,
+        height: half_h,
+        format: chalkraw_core::ImageFormat::Raw(raw_format),
+        pixels,
+    })
+}
+
 fn match_format(detected: Option<image::ImageFormat>, ctx: &Path) -> Result<ImageFormat, IoError> {
     match detected {
         Some(image::ImageFormat::Jpeg) => Ok(ImageFormat::Jpeg),
@@ -116,6 +296,12 @@ fn log_icc_profile_if_present(path: &Path) {
 
 pub fn decode_image(path: impl AsRef<Path>) -> Result<LinearImage, IoError> {
     let path: PathBuf = path.as_ref().to_path_buf();
+
+    // Phase 4: route known RAW extensions to the RAW decode path before
+    // attempting the standard image crate reader (which does not support RAW).
+    if let Some(raw_format) = raw_format_from_extension(&path) {
+        return decode_raw(path, raw_format);
+    }
 
     // Issue 3: log ICC profile presence so users can confirm the cause of
     // colour differences when their camera embeds a non-sRGB profile.
@@ -318,5 +504,48 @@ mod tests {
         let (w, h) = (decoded.width(), decoded.height());
         assert!(w <= 256 && h <= 256);
         assert!(w == 256 || h == 256); // one edge must hit the max
+    }
+
+    #[test]
+    fn raw_format_from_extension_recognises_common_raws() {
+        assert_eq!(
+            raw_format_from_extension(Path::new("foo.cr2")),
+            Some(chalkraw_core::RawFormat::CanonCr2)
+        );
+        assert_eq!(
+            raw_format_from_extension(Path::new("foo.CR3")),
+            Some(chalkraw_core::RawFormat::CanonCr3)
+        );
+        assert_eq!(
+            raw_format_from_extension(Path::new("foo.NEF")),
+            Some(chalkraw_core::RawFormat::NikonNef)
+        );
+        assert_eq!(
+            raw_format_from_extension(Path::new("foo.arw")),
+            Some(chalkraw_core::RawFormat::SonyArw)
+        );
+        assert_eq!(raw_format_from_extension(Path::new("foo.jpg")), None);
+        assert_eq!(raw_format_from_extension(Path::new("foo")), None);
+    }
+
+    #[test]
+    fn find_embedded_jpeg_finds_marker_run() {
+        // Build a minimal SOI APP0 ... EOI sequence at offset 2.
+        let mut bytes = vec![0x00u8, 0x01];
+        bytes.extend_from_slice(&[0xFF, 0xD8, 0xFF, 0xE0]);
+        bytes.extend_from_slice(&[0x12, 0x34, 0x56]);
+        bytes.extend_from_slice(&[0xFF, 0xD9]);
+        bytes.extend_from_slice(&[0x00, 0x00]);
+        let jpeg = find_embedded_jpeg(&bytes);
+        assert!(jpeg.is_some(), "expected to find a JPEG");
+        let jpeg = jpeg.unwrap();
+        assert!(
+            jpeg.starts_with(&[0xFF, 0xD8]),
+            "should start with SOI"
+        );
+        assert!(
+            jpeg.ends_with(&[0xFF, 0xD9]),
+            "should end with EOI"
+        );
     }
 }
