@@ -1,10 +1,10 @@
-// chalkraw-rs develop shader — Phase 2F: Lens Correction + Slider-based Crop.
+// chalkraw-rs develop shader — Phase 2E.2: Sharpening (unsharp mask).
 // Operations are applied in Lightroom order: WB → Exposure → Contrast →
 // Highlights/Shadows/Whites/Blacks → Saturation → HSL → Color Grading →
-// Parametric Curve → Vibrance → Vignette → Grain.
+// Parametric Curve → Clarity → Sharpening → Vibrance → Vignette → Grain.
 //
 // The WGSL struct layout must stay byte-for-byte in sync with EditUniforms in
-// uniforms.rs (total 304 bytes). WGSL alignment rules:
+// uniforms.rs (total 384 bytes). WGSL alignment rules:
 //   vec4<f32> → align 16, size 16
 //   vec3<f32> → align 16, size 12
 //   vec2<f32> → align  8, size  8
@@ -64,7 +64,11 @@
 // 344   _pad_crop        vec2<f32>
 // Phase 0.13.2 (manual sRGB): vec4<u32> = 16 bytes.
 // 352   srgb_pad         vec4<u32>   .x = srgb_output flag (1 = encode, 0 = skip)
-// Total: 368 bytes.
+// Phase 2E.2 (Sharpening): 2 × f32 + vec2<f32> pad = 16 bytes.
+// 368   sharpening_amount  f32
+// 372   sharpening_radius  f32
+// 376   _pad_sharp         vec2<f32>
+// Total: 384 bytes.
 
 struct EditUniforms {
     exposure:           f32,
@@ -120,13 +124,19 @@ struct EditUniforms {
     // Packed as vec4<u32> so the WGSL struct size matches the Rust layout exactly:
     // .x = srgb_output (1 = manual encode, 0 = hardware does it), .yzw = padding.
     srgb_pad:           vec4<u32>,
+    // Phase 2E.2: Sharpening (offset 368..384).
+    sharpening_amount:  f32,
+    sharpening_radius:  f32,
+    _pad_sharp:         vec2<f32>,
 };
 
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
 @group(0) @binding(1) var source_sampler: sampler;
 @group(0) @binding(2) var<uniform> edit: EditUniforms;
-// Phase 2E.1: pre-blurred source texture for Clarity local-contrast boost.
-@group(0) @binding(3) var blur_tex: texture_2d<f32>;
+// Phase 2E.1: large-sigma pre-blurred source for Clarity local-contrast boost.
+@group(0) @binding(3) var clarity_blur_tex: texture_2d<f32>;
+// Phase 2E.2: small-sigma pre-blurred source for Sharpening (unsharp mask).
+@group(0) @binding(4) var sharp_blur_tex: texture_2d<f32>;
 
 // ── HSV conversion helpers (Sam Hocevar's branchless algorithm) ───────────────
 
@@ -355,14 +365,23 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         rgb.b = clamp(rgb.b + parametric_zone_lift(rgb.b, pc), 0.0, 1.0);
     }
 
-    // 6c. Clarity — local-contrast enhancement using the pre-blurred source.
+    // 6c. Clarity — local-contrast enhancement using the large-sigma pre-blurred source.
     //     blurred is sampled at the *output* UV (after crop/lens), which is the same
     //     UV used to sample source_tex, ensuring the blur matches the geometry.
     //     clarity / 100 * 0.5 keeps amount=100 from blowing out.
     {
-        let blurred = textureSample(blur_tex, source_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0))).rgb;
+        let blurred = textureSample(clarity_blur_tex, source_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0))).rgb;
         let local_contrast = rgb - blurred;
         rgb = rgb + local_contrast * (edit.clarity / 100.0 * 0.5);
+    }
+
+    // 6d. Sharpening — unsharp mask using the small-sigma pre-blurred source.
+    //     output = original + (original - blurred_small) × (amount / 150)
+    //     amount slider 0..150; dividing by 150 maps max amount to ~1.0 boost.
+    {
+        let sharp_blurred = textureSample(sharp_blur_tex, source_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0))).rgb;
+        let detail = rgb - sharp_blurred;
+        rgb = rgb + detail * (edit.sharpening_amount / 150.0);
     }
 
     // 7. Vibrance — saturation boost weighted against already-saturated colours.

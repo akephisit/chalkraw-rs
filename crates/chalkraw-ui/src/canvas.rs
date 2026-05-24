@@ -21,14 +21,20 @@ pub struct CanvasGpu {
     pub source: SourceTexture,
     pub pipeline: DevelopPipeline,
     pub blur_pipeline: BlurPipeline,
-    /// Intermediate ping-pong texture A (horizontal blur output).
+    /// Clarity blur ping-pong — large sigma (~16 px), used for Clarity local-contrast.
     #[allow(dead_code)]
-    pub blur_tex_a: ewgpu::Texture,
-    pub blur_view_a: ewgpu::TextureView,
-    /// Intermediate ping-pong texture B (vertical blur output — final blur result).
+    pub clarity_tex_a: ewgpu::Texture,
+    pub clarity_view_a: ewgpu::TextureView,
     #[allow(dead_code)]
-    pub blur_tex_b: ewgpu::Texture,
-    pub blur_view_b: ewgpu::TextureView,
+    pub clarity_tex_b: ewgpu::Texture,
+    pub clarity_view_b: ewgpu::TextureView,
+    /// Sharpening blur ping-pong — small sigma (~1-3 px), used for unsharp mask.
+    #[allow(dead_code)]
+    pub sharp_tex_a: ewgpu::Texture,
+    pub sharp_view_a: ewgpu::TextureView,
+    #[allow(dead_code)]
+    pub sharp_tex_b: ewgpu::Texture,
+    pub sharp_view_b: ewgpu::TextureView,
     pub bind_group: ewgpu::BindGroup,
 }
 
@@ -37,44 +43,69 @@ impl CanvasGpu {
         let source = SourceTexture::upload(rd, img.width, img.height, &img.pixels);
         let pipeline = DevelopPipeline::new(rd, PipelineConfig { output_format });
         let blur_pipeline = BlurPipeline::new(rd);
-        let (blur_tex_a, blur_view_a, blur_tex_b, blur_view_b) =
+        let (clarity_tex_a, clarity_view_a, clarity_tex_b, clarity_view_b) =
             create_pingpong(rd, img.width, img.height);
-        // Build the develop bind group pointing at blur_view_b (the final blur result).
-        let bind_group = pipeline.make_bind_group(&source, &blur_view_b);
+        let (sharp_tex_a, sharp_view_a, sharp_tex_b, sharp_view_b) =
+            create_pingpong(rd, img.width, img.height);
+        // Build the develop bind group pointing at the final blur result textures.
+        let bind_group = pipeline.make_bind_group(&source, &clarity_view_b, &sharp_view_b);
         let me = Self {
             source,
             pipeline,
             blur_pipeline,
-            blur_tex_a,
-            blur_view_a,
-            blur_tex_b,
-            blur_view_b,
+            clarity_tex_a,
+            clarity_view_a,
+            clarity_tex_b,
+            clarity_view_b,
+            sharp_tex_a,
+            sharp_view_a,
+            sharp_tex_b,
+            sharp_view_b,
             bind_group,
         };
-        // Run an initial blur at image-load time (sigma=16 px).
-        me.run_blur(16.0);
+        // Run initial blurs at image-load time.
+        // Clarity uses sigma=16 px (large); Sharpening default radius=1.0 px (small).
+        me.run_blurs(16.0, 1.0);
         me
     }
 
-    /// Run the two-pass separable Gaussian blur and store the result in blur_view_b.
-    /// Horizontal pass: source → blur_view_a.
-    /// Vertical pass:   blur_view_a → blur_view_b.
-    pub fn run_blur(&self, sigma: f32) {
+    /// Run both two-pass separable Gaussian blurs.
+    /// Clarity:    source → clarity_view_a (H) → clarity_view_b (V).
+    /// Sharpening: source → sharp_view_a   (H) → sharp_view_b   (V).
+    pub fn run_blurs(&self, clarity_sigma: f32, sharp_sigma: f32) {
+        // Clarity blur (large sigma).
         self.blur_pipeline.render_pass(
             &self.source.view,
-            &self.blur_view_a,
+            &self.clarity_view_a,
             self.source.width,
             self.source.height,
             true,
-            sigma,
+            clarity_sigma,
         );
         self.blur_pipeline.render_pass(
-            &self.blur_view_a,
-            &self.blur_view_b,
+            &self.clarity_view_a,
+            &self.clarity_view_b,
             self.source.width,
             self.source.height,
             false,
-            sigma,
+            clarity_sigma,
+        );
+        // Sharpening blur (small sigma).
+        self.blur_pipeline.render_pass(
+            &self.source.view,
+            &self.sharp_view_a,
+            self.source.width,
+            self.source.height,
+            true,
+            sharp_sigma,
+        );
+        self.blur_pipeline.render_pass(
+            &self.sharp_view_a,
+            &self.sharp_view_b,
+            self.source.width,
+            self.source.height,
+            false,
+            sharp_sigma,
         );
     }
 

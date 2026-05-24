@@ -23,8 +23,8 @@ fn render_solid(rd: &RenderDevice, w: u32, h: u32, pixels: Vec<f32>, edit: &Edit
     let src = SourceTexture::upload(rd, w, h, &pixels);
     let pipe = DevelopPipeline::new(rd, PipelineConfig::default());
     pipe.update_uniforms(&EditUniforms::from(edit));
-    // Tests that don't exercise Clarity pass source.view as the blur view.
-    let bg = pipe.make_bind_group(&src, &src.view);
+    // Tests that don't exercise Clarity/Sharpening pass source.view for both blur views.
+    let bg = pipe.make_bind_group(&src, &src.view, &src.view);
     let (tex, view) = make_target(rd, w, h);
     pipe.render(&view, &bg);
     read_to_cpu(rd, &tex, w, h).unwrap()
@@ -474,7 +474,8 @@ fn manual_srgb_encoding_matches_hardware_encoding() {
     });
     pipe_hw.update_uniforms(&EditUniforms::from(&edit));
     let src_hw = SourceTexture::upload(&rd, w, h, &pixels);
-    let bg_hw = pipe_hw.make_bind_group(&src_hw, &src_hw.view);
+    // Pass source.view for both blur views (neither Clarity nor Sharpening exercised).
+    let bg_hw = pipe_hw.make_bind_group(&src_hw, &src_hw.view, &src_hw.view);
     let (tex_hw, view_hw) = make_target(&rd, w, h);
     pipe_hw.render(&view_hw, &bg_hw);
     let out_hw = read_to_cpu(&rd, &tex_hw, w, h).unwrap();
@@ -488,7 +489,7 @@ fn manual_srgb_encoding_matches_hardware_encoding() {
 
     pipe_sw.update_uniforms(&EditUniforms::from(&edit));
     let src_sw = SourceTexture::upload(&rd, w, h, &pixels);
-    let bg_sw = pipe_sw.make_bind_group(&src_sw, &src_sw.view);
+    let bg_sw = pipe_sw.make_bind_group(&src_sw, &src_sw.view, &src_sw.view);
 
     // Create a non-sRGB render target manually (make_target always uses Rgba8UnormSrgb).
     let target_sw = rd.device.create_texture(&wgpu::TextureDescriptor {
@@ -548,6 +549,68 @@ fn vibrance_boosts_low_saturation_colors() {
 
 // ── Phase 2E.1: Clarity ───────────────────────────────────────────────────────
 
+// ── Phase 2E.2: Sharpening ────────────────────────────────────────────────────
+
+/// Sharpening amount=100 on a striped image (alternating pixel-bright/dark) should
+/// produce measurably different output vs amount=0, because the small-sigma blur
+/// differs from the source on high-frequency content.
+#[test]
+fn sharpening_amount_100_changes_high_freq_edges() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skip: no GPU"); return; }
+    };
+    let w: u32 = 32;
+    let h: u32 = 32;
+    // Vertical stripes with sharp transitions every other pixel.
+    let pixels: Vec<f32> = (0..w * h).flat_map(|i: u32| {
+        let x = i % w;
+        let v = if x.is_multiple_of(2) { 0.4_f32 } else { 0.6_f32 };
+        [v, v, v, 1.0_f32]
+    }).collect();
+
+    let source = SourceTexture::upload(&rd, w, h, &pixels);
+    let blur = BlurPipeline::new(&rd);
+    let (_, clar_a, _, clar_b) = create_pingpong(&rd, w, h);
+    let (_, sharp_a, _, sharp_b) = create_pingpong(&rd, w, h);
+    blur.render_pass(&source.view, &clar_a, w, h, true, 16.0);
+    blur.render_pass(&clar_a, &clar_b, w, h, false, 16.0);
+    blur.render_pass(&source.view, &sharp_a, w, h, true, 1.5);
+    blur.render_pass(&sharp_a, &sharp_b, w, h, false, 1.5);
+
+    let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
+    let bind = pipe.make_bind_group(&source, &clar_b, &sharp_b);
+
+    // Render with sharpening amount = 100.
+    let mut edit = EditState::default();
+    edit.detail.sharpening.amount = 100.0;
+    edit.detail.sharpening.radius = 1.5;
+    pipe.update_uniforms(&EditUniforms::from(&edit));
+    let (tex, view) = make_target(&rd, w, h);
+    pipe.render(&view, &bind);
+    let with_sharp = read_to_cpu(&rd, &tex, w, h).unwrap();
+
+    // Render with sharpening amount = 0 (same bind group).
+    let edit_zero = EditState::default();
+    pipe.update_uniforms(&EditUniforms::from(&edit_zero));
+    let (tex0, view0) = make_target(&rd, w, h);
+    pipe.render(&view0, &bind);
+    let without_sharp = read_to_cpu(&rd, &tex0, w, h).unwrap();
+
+    // High-freq edge pixels should differ.
+    let mut total_diff = 0i32;
+    for i in 0..(w * h) {
+        let idx = (i * 4) as usize;
+        total_diff += (with_sharp[idx] as i32 - without_sharp[idx] as i32).abs();
+    }
+    assert!(
+        total_diff > 100,
+        "sharpening should produce visible difference, got total_diff={total_diff}"
+    );
+}
+
+// ── Phase 2E.1: Clarity ───────────────────────────────────────────────────────
+
 /// Clarity +50 on a striped image (alternating bright/dark bands) should
 /// alter edge-adjacent pixels relative to clarity=0, because the blur produces
 /// a value that differs from the source on such high-frequency content.
@@ -573,7 +636,8 @@ fn clarity_plus_50_increases_contrast_on_textured_image() {
     blur.render_pass(&blur_view_a, &blur_view_b, w, h, false, 8.0);
 
     let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
-    let bind = pipe.make_bind_group(&source, &blur_view_b);
+    // Pass source.view for the sharpening blur (not exercised in this test).
+    let bind = pipe.make_bind_group(&source, &blur_view_b, &source.view);
 
     // Render with clarity = 50.
     let mut edit = EditState::default();

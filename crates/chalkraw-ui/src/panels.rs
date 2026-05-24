@@ -299,7 +299,24 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
     // ── Detail (Phase 2E) ─────────────────────────────────────────────────────
     egui::CollapsingHeader::new("Detail")
         .default_open(false)
-        .show(ui, |ui| { ui.label("(Phase 2E)"); });
+        .show(ui, |ui| {
+            ui.strong("Sharpening");
+            ui.label("Amount");
+            if ui.add(egui::Slider::new(&mut edit.detail.sharpening.amount, 0.0..=150.0).fixed_decimals(0)).changed() { changed = true; }
+            ui.label("Radius");
+            if ui.add(egui::Slider::new(&mut edit.detail.sharpening.radius, 0.5..=3.0).fixed_decimals(1).suffix(" px")).changed() { changed = true; }
+            ui.add_space(4.0);
+            ui.label("Detail (Phase 2E.2 polish)");
+            ui.add_enabled(false, egui::Slider::new(&mut edit.detail.sharpening.detail, 0.0..=100.0));
+            ui.label("Masking (Phase 2E.2 polish)");
+            ui.add_enabled(false, egui::Slider::new(&mut edit.detail.sharpening.masking, 0.0..=100.0));
+            ui.add_space(4.0);
+            ui.strong("Noise Reduction");
+            ui.label("Luminance (Phase 2E.4)");
+            ui.add_enabled(false, egui::Slider::new(&mut edit.detail.noise_reduction.luminance, 0.0..=100.0));
+            ui.label("Color (Phase 2E.4)");
+            ui.add_enabled(false, egui::Slider::new(&mut edit.detail.noise_reduction.color, 0.0..=100.0));
+        });
 
     // ── Effects ───────────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("Effects")

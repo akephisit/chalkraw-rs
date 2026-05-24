@@ -79,9 +79,20 @@ impl DevelopPipeline {
                     },
                     count: None,
                 },
-                // Phase 2E.1: pre-blurred source for Clarity local-contrast.
+                // Phase 2E.1: large-sigma pre-blurred source for Clarity local-contrast.
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Phase 2E.2: small-sigma pre-blurred source for Sharpening (unsharp mask).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -164,13 +175,17 @@ impl DevelopPipeline {
     }
 
     /// Build a bind group for the develop pipeline.
-    /// `blur_view` should be an Rgba16Float view of the pre-blurred source
-    /// (same dimensions as `source`). Pass `&source.view` in callers that do
-    /// not exercise Clarity — with clarity=0 the (source − blur) term is zero.
+    /// `clarity_blur_view` should be an Rgba16Float view of the large-sigma
+    /// pre-blurred source (same dimensions as `source`).
+    /// `sharp_blur_view` should be an Rgba16Float view of the small-sigma
+    /// pre-blurred source.
+    /// Pass `&source.view` for either arg in callers that do not exercise those
+    /// effects — with the relevant slider at 0 the term is zero.
     pub fn make_bind_group(
         &self,
         source: &SourceTexture,
-        blur_view: &wgpu::TextureView,
+        clarity_blur_view: &wgpu::TextureView,
+        sharp_blur_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop bg"),
@@ -179,7 +194,8 @@ impl DevelopPipeline {
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&source.view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(blur_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(clarity_blur_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(sharp_blur_view) },
             ],
         })
     }
