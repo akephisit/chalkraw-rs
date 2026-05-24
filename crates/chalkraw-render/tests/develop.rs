@@ -806,3 +806,62 @@ fn nr_luminance_100_smooths_noisy_source() {
         "NR luminance=100 should reduce variance by at least 20%: off={var_off:.2} on={var_on:.2}"
     );
 }
+
+// ── Phase 2E.5: Dehaze ────────────────────────────────────────────────────────
+
+/// Dehaze=+100 on a low-contrast "hazy" pattern (two sides at 0.45 and 0.55)
+/// should widen the contrast span between the two halves, because the local-
+/// contrast boost (biased toward darker regions) pushes the values apart.
+#[test]
+fn dehaze_positive_increases_contrast_on_hazy_pattern() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skip: no GPU"); return; }
+    };
+    let w = 32;
+    let h = 32;
+    // Simulate haze: low contrast around midgrey with a faint pattern.
+    let pixels: Vec<f32> = (0..w * h).flat_map(|i: u32| {
+        let x = i % w;
+        let v = if x < w / 2 { 0.45 } else { 0.55 };
+        [v, v, v, 1.0]
+    }).collect();
+    let source = SourceTexture::upload(&rd, w, h, &pixels);
+    let blur = BlurPipeline::new(&rd);
+    let (_, c_a, _, c_b) = create_pingpong(&rd, w, h);
+    let (_, s_a, _, s_b) = create_pingpong(&rd, w, h);
+    let (_, t_a, _, t_b) = create_pingpong(&rd, w, h);
+    let (_, n_a, _, n_b) = create_pingpong(&rd, w, h);
+    blur.render_pass(&source.view, &c_a, w, h, true,  16.0);
+    blur.render_pass(&c_a, &c_b, w, h, false, 16.0);
+    blur.render_pass(&source.view, &s_a, w, h, true,  1.5);
+    blur.render_pass(&s_a, &s_b, w, h, false, 1.5);
+    blur.render_pass(&source.view, &t_a, w, h, true,  5.0);
+    blur.render_pass(&t_a, &t_b, w, h, false, 5.0);
+    blur.render_pass(&source.view, &n_a, w, h, true,  2.0);
+    blur.render_pass(&n_a, &n_b, w, h, false, 2.0);
+    let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
+    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b, &n_b);
+
+    let edit_off = EditState::default();
+    pipe.update_uniforms(&EditUniforms::from(&edit_off));
+    let (tex_off, view_off) = make_target(&rd, w, h);
+    pipe.render(&view_off, &bind);
+    let off = read_to_cpu(&rd, &tex_off, w, h).unwrap();
+
+    let mut edit_on = EditState::default();
+    edit_on.presence.dehaze = 100.0;
+    pipe.update_uniforms(&EditUniforms::from(&edit_on));
+    let (tex_on, view_on) = make_target(&rd, w, h);
+    pipe.render(&view_on, &bind);
+    let on = read_to_cpu(&rd, &tex_on, w, h).unwrap();
+
+    // Light half should brighten or darken further; dark half similarly. Verify span widens.
+    let center_left  = off[((16 * w + 8) * 4) as usize];
+    let center_right = off[((16 * w + 24) * 4) as usize];
+    let span_off = (center_right as i32 - center_left as i32).abs();
+    let on_left  = on[((16 * w + 8) * 4) as usize];
+    let on_right = on[((16 * w + 24) * 4) as usize];
+    let span_on = (on_right as i32 - on_left as i32).abs();
+    assert!(span_on > span_off, "dehaze should widen the contrast span: off={span_off} on={span_on}");
+}

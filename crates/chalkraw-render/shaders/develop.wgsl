@@ -1,4 +1,4 @@
-// chalkraw-rs develop shader — Phase 2E.3: Texture mid-freq local contrast.
+// chalkraw-rs develop shader — Phase 2E.5: Dehaze (simplified, reuses clarity blur).
 // Operations are applied in Lightroom order: WB → Exposure → Contrast →
 // Highlights/Shadows/Whites/Blacks → Saturation → HSL → Color Grading →
 // Parametric Curve → Clarity → Sharpening → Vibrance → Vignette → Grain.
@@ -72,7 +72,9 @@
 // 384   nr_luminance       f32
 // 388   nr_color           f32
 // 392   _pad_nr            vec2<f32>
-// Total: 400 bytes.
+// Phase 2E.5 (Dehaze): 1 × vec4<f32> = 16 bytes.
+// 400   dehaze_pad         vec4<f32>   .x = dehaze (-100..100), .yzw = padding
+// Total: 416 bytes.
 
 struct EditUniforms {
     exposure:           f32,
@@ -136,6 +138,12 @@ struct EditUniforms {
     nr_luminance:       f32,
     nr_color:           f32,
     _pad_nr:            vec2<f32>,
+    // Phase 2E.5: Dehaze (offset 400..416).
+    // Simplified approximation — not a dark-channel-prior dehaze.
+    // Reuses clarity_blur_tex as the low-frequency "atmospheric" reference.
+    // Packed as vec4<f32> so the WGSL struct size matches the Rust layout:
+    // .x = dehaze (-100..100), .yzw = padding.
+    dehaze_pad:         vec4<f32>,
 };
 
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
@@ -411,6 +419,29 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let blurred = textureSample(clarity_blur_tex, source_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0))).rgb;
         let local_contrast = rgb - blurred;
         rgb = rgb + local_contrast * (edit.clarity / 100.0 * 0.5);
+    }
+
+    // 6c2. Dehaze — simplified approximation (NOT a dark-channel-prior dehaze).
+    //      Reuses clarity_blur_tex (sigma=16px) as the low-frequency "atmospheric"
+    //      reference. Contrast boost is biased toward darker (presumed-hazier) regions
+    //      via (1.5 - lum*1.5), and a matching saturation lift restores colour that
+    //      haze desaturates.
+    //
+    //      Limitation: no atmospheric-light estimation, no depth map, no spatial
+    //      non-uniformity. A proper dark-channel-prior pass can replace this in a
+    //      future polish phase.
+    {
+        let dehaze_strength = edit.dehaze_pad.x / 100.0;  // -1..1
+        let dehaze_lum = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        // Bias: ~1.5 at black, ~0.75 at mid-grey, 0 at white — dark/hazy areas get more correction.
+        let dehaze_bias = clamp(1.5 - dehaze_lum * 1.5, 0.0, 1.5);
+        let dehaze_blur = textureSample(clarity_blur_tex, source_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0))).rgb;
+        let dehaze_detail = rgb - dehaze_blur;
+        rgb = rgb + dehaze_detail * dehaze_strength * dehaze_bias * 1.5;
+
+        // Saturation lift — restores colour washed out by haze.
+        let dehaze_gray = vec3<f32>(dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722)));
+        rgb = mix(dehaze_gray, rgb, 1.0 + dehaze_strength * dehaze_bias * 0.5);
     }
 
     // 6d. Texture — mid-frequency local-contrast (smaller sigma than Clarity).

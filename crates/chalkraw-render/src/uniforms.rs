@@ -68,7 +68,10 @@ use chalkraw_core::EditState;
 /// 384  nr_luminance      f32
 /// 388  nr_color          f32
 /// 392  _pad_nr           [f32;2]
-/// Total: 400 bytes
+/// Phase 2E.5 (Dehaze): 1 × f32 + 3-float pad = 16 bytes.
+/// 400  dehaze            f32
+/// 404  _pad_dehaze       [f32;3]
+/// Total: 416 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct EditUniforms {
@@ -137,6 +140,10 @@ pub struct EditUniforms {
     pub nr_luminance: f32,          // offset 384  0..100 — strength of luminance smoothing mix
     pub nr_color: f32,              // offset 388  0..100 — strength of chroma smoothing mix
     pub _pad_nr: [f32; 2],          // offset 392  → pads to 400
+    // Phase 2E.5: Dehaze (simplified — reuses clarity_blur as low-freq reference).
+    // Not a physically-correct dark-channel-prior dehaze; visually plausible approx.
+    pub dehaze: f32,                // offset 400  -100..100 (positive=remove haze, negative=add)
+    pub _pad_dehaze: [f32; 3],      // offset 404  → pads to 416
 }
 
 impl From<&EditState> for EditUniforms {
@@ -212,6 +219,9 @@ impl From<&EditState> for EditUniforms {
             nr_luminance: e.detail.noise_reduction.luminance,
             nr_color: e.detail.noise_reduction.color,
             _pad_nr: [0.0; 2],
+            // Phase 2E.5: Dehaze.
+            dehaze: e.presence.dehaze,
+            _pad_dehaze: [0.0; 3],
         }
     }
 }
@@ -222,7 +232,7 @@ mod tests {
 
     #[test]
     fn edit_uniforms_size_matches_wgsl() {
-        // Must be 400 bytes to match the WGSL EditUniforms struct layout.
+        // Must be 416 bytes to match the WGSL EditUniforms struct layout.
         // Phase 2A: 128 bytes. Phase 2B adds 6 × vec4<f32> = 96 bytes → 224.
         // Phase 2C adds 4 × vec4<f32> = 64 bytes → 288.
         // Phase 2D adds 1 × vec4<f32> = 16 bytes → 304.
@@ -230,10 +240,11 @@ mod tests {
         // Phase 0.13.2 adds srgb_output (u32) + 3-u32 pad = 16 bytes → 368.
         // Phase 2E.2 adds sharpening_amount + sharpening_radius + 2-f32 pad = 16 bytes → 384.
         // Phase 2E.4 adds nr_luminance + nr_color + 2-f32 pad = 16 bytes → 400.
+        // Phase 2E.5 adds dehaze + 3-f32 pad = 16 bytes → 416.
         // If this fails, check that the Rust and WGSL fields are in sync.
         assert_eq!(
             std::mem::size_of::<EditUniforms>(),
-            400,
+            416,
             "EditUniforms size mismatch — Rust and WGSL structs are out of sync"
         );
     }
