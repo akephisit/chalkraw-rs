@@ -114,9 +114,9 @@ pub fn export_current(
         output_format: wgpu::TextureFormat::Rgba8UnormSrgb,
     });
     pipeline.update_uniforms(&EditUniforms::from(edit));
-    // Pass source.view for both blur views: export does not exercise Clarity or
-    // Sharpening so the terms are zero with those sliders at 0.
-    let bind_group = pipeline.make_bind_group(&source, &source.view, &source.view);
+    // Pass source.view for all blur views: export does not exercise Clarity,
+    // Sharpening, or Texture so those terms are zero with sliders at 0.
+    let bind_group = pipeline.make_bind_group(&source, &source.view, &source.view, &source.view);
 
     let (target, view) = make_target(rd, out_w, out_h);
     pipeline.render(&view, &bind_group);
@@ -193,9 +193,9 @@ fn export_single_item(
         output_format: wgpu::TextureFormat::Rgba8UnormSrgb,
     });
     pipeline.update_uniforms(&EditUniforms::from(&item.edit));
-    // Pass source.view for both blur views: batch export does not exercise Clarity
-    // or Sharpening so those terms are zero with those sliders at 0.
-    let bind_group = pipeline.make_bind_group(&source, &source.view, &source.view);
+    // Pass source.view for all blur views: batch export does not exercise Clarity,
+    // Sharpening, or Texture so those terms are zero with sliders at 0.
+    let bind_group = pipeline.make_bind_group(&source, &source.view, &source.view, &source.view);
 
     let (target, view) = make_target(rd, out_w, out_h);
     pipeline.render(&view, &bind_group);

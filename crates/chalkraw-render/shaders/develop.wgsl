@@ -1,4 +1,4 @@
-// chalkraw-rs develop shader — Phase 2E.2: Sharpening (unsharp mask).
+// chalkraw-rs develop shader — Phase 2E.3: Texture mid-freq local contrast.
 // Operations are applied in Lightroom order: WB → Exposure → Contrast →
 // Highlights/Shadows/Whites/Blacks → Saturation → HSL → Color Grading →
 // Parametric Curve → Clarity → Sharpening → Vibrance → Vignette → Grain.
@@ -137,6 +137,8 @@ struct EditUniforms {
 @group(0) @binding(3) var clarity_blur_tex: texture_2d<f32>;
 // Phase 2E.2: small-sigma pre-blurred source for Sharpening (unsharp mask).
 @group(0) @binding(4) var sharp_blur_tex: texture_2d<f32>;
+// Phase 2E.3: mid-sigma pre-blurred source for Texture local-contrast.
+@group(0) @binding(5) var texture_blur_tex: texture_2d<f32>;
 
 // ── HSV conversion helpers (Sam Hocevar's branchless algorithm) ───────────────
 
@@ -375,7 +377,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         rgb = rgb + local_contrast * (edit.clarity / 100.0 * 0.5);
     }
 
-    // 6d. Sharpening — unsharp mask using the small-sigma pre-blurred source.
+    // 6d. Texture — mid-frequency local-contrast (smaller sigma than Clarity).
+    //     Same unsharp-mask form as Clarity but sigma ≈ 5 px targets skin pores
+    //     and fine detail rather than large tonal regions.
+    {
+        let texture_blurred = textureSample(texture_blur_tex, source_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0))).rgb;
+        let texture_detail = rgb - texture_blurred;
+        rgb = rgb + texture_detail * (edit.texture / 100.0 * 0.5);
+    }
+
+    // 6e. Sharpening — unsharp mask using the small-sigma pre-blurred source.
     //     output = original + (original - blurred_small) × (amount / 150)
     //     amount slider 0..150; dividing by 150 maps max amount to ~1.0 boost.
     {

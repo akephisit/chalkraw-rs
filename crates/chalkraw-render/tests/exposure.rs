@@ -26,8 +26,8 @@ fn exposure_zero_returns_input_brightness() {
     let mut edit = EditState::default();
     edit.tone.exposure = 0.0;
     pipe.update_uniforms(&EditUniforms::from(&edit));
-    // Pass source.view for both blur views (neither Clarity nor Sharpening exercised).
-    let bg = pipe.make_bind_group(&src, &src.view, &src.view);
+    // Pass source.view for all blur views (Clarity/Sharpening/Texture not exercised).
+    let bg = pipe.make_bind_group(&src, &src.view, &src.view, &src.view);
     let (tex, view) = make_target(&rd, w, h);
     pipe.render(&view, &bg);
     let pixels = read_to_cpu(&rd, &tex, w, h).unwrap();
@@ -49,8 +49,8 @@ fn exposure_plus_one_doubles_linear_brightness() {
     let mut edit = EditState::default();
     edit.tone.exposure = 1.0; // 2× linear
     pipe.update_uniforms(&EditUniforms::from(&edit));
-    // Pass source.view for both blur views (neither Clarity nor Sharpening exercised).
-    let bg = pipe.make_bind_group(&src, &src.view, &src.view);
+    // Pass source.view for all blur views (Clarity/Sharpening/Texture not exercised).
+    let bg = pipe.make_bind_group(&src, &src.view, &src.view, &src.view);
     let (tex, view) = make_target(&rd, w, h);
     pipe.render(&view, &bg);
     let pixels = read_to_cpu(&rd, &tex, w, h).unwrap();

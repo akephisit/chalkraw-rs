@@ -577,10 +577,10 @@ impl eframe::App for ChalkrawApp {
             if let Some(gpu) = self.gpu.as_ref() {
                 if edit_changed {
                     gpu.update(&self.state.edit);
-                    // Re-run both blurs on every edit change. Clarity uses a fixed
-                    // sigma=16; Sharpening uses the radius slider as sigma. Re-running
-                    // both keeps the code simple; GPU blur of a typical image is <10ms.
-                    gpu.run_blurs(16.0, self.state.edit.detail.sharpening.radius);
+                    // Re-run all three blurs on every edit change. Clarity uses a fixed
+                    // sigma=16; Sharpening uses the radius slider as sigma; Texture
+                    // uses a fixed sigma=5 (no radius slider in Lightroom).
+                    gpu.run_blurs(16.0, self.state.edit.detail.sharpening.radius, 5.0);
                     self.state.mark_dirty();
                 }
                 // Issue 2: letterbox — preserve image aspect ratio rather than

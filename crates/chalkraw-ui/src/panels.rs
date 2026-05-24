@@ -146,8 +146,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
     egui::CollapsingHeader::new("Presence")
         .default_open(false)
         .show(ui, |ui| {
-            ui.label("Texture (Phase 2E.3)");
-            ui.add_enabled(false, egui::Slider::new(&mut edit.presence.texture, -100.0..=100.0));
+            ui.label("Texture");
+            if ui.add(egui::Slider::new(&mut edit.presence.texture, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
             ui.label("Clarity");
             if ui.add(egui::Slider::new(&mut edit.presence.clarity, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
             ui.label("Dehaze (Phase 2E.5)");

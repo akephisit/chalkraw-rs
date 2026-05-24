@@ -101,6 +101,17 @@ impl DevelopPipeline {
                     },
                     count: None,
                 },
+                // Phase 2E.3: mid-sigma pre-blurred source for Texture local-contrast.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -179,13 +190,16 @@ impl DevelopPipeline {
     /// pre-blurred source (same dimensions as `source`).
     /// `sharp_blur_view` should be an Rgba16Float view of the small-sigma
     /// pre-blurred source.
-    /// Pass `&source.view` for either arg in callers that do not exercise those
+    /// `texture_blur_view` should be an Rgba16Float view of the mid-sigma
+    /// pre-blurred source (sigma ≈ 5 px) for Texture local-contrast.
+    /// Pass `&source.view` for any arg in callers that do not exercise those
     /// effects — with the relevant slider at 0 the term is zero.
     pub fn make_bind_group(
         &self,
         source: &SourceTexture,
         clarity_blur_view: &wgpu::TextureView,
         sharp_blur_view: &wgpu::TextureView,
+        texture_blur_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop bg"),
@@ -196,6 +210,7 @@ impl DevelopPipeline {
                 wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(clarity_blur_view) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(sharp_blur_view) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(texture_blur_view) },
             ],
         })
     }
