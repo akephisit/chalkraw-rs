@@ -88,6 +88,7 @@ fn export_batch_with_watermark_completes() {
             size_pct: 25.0,
             opacity: 0.8,
             margin_pct: 5.0,
+            rotation_deg: 0.0,
         }),
         watermark_preset: None,
     };
@@ -191,4 +192,16 @@ fn export_with_watermark_preset_composites_two_layers() {
     assert_eq!(results.len(), 1);
     assert!(results[0].error.is_none(), "error: {:?}", results[0].error);
     assert!(results[0].output_path.as_ref().unwrap().exists());
+}
+
+/// Rotating a 4×8 RGBA image by 90° should produce an 8×4 image.
+/// This verifies `rotate_image` is wired correctly and that the lossless
+/// 90°-snap path works without GPU involvement.
+#[test]
+fn watermark_rotation_90_swaps_image_dimensions() {
+    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(
+        4, 8, image::Rgba([255, 0, 0, 255]),
+    );
+    let rotated = chalkraw_export::rotate_image(&img, 90.0);
+    assert_eq!(rotated.dimensions(), (8, 4));
 }

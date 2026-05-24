@@ -56,6 +56,8 @@ pub struct WatermarkStamp {
     pub opacity: f32,
     /// Percent of output long edge (0..20).
     pub margin_pct: f32,
+    /// Rotation in degrees. Snapped to nearest 90° increment (v1).
+    pub rotation_deg: f32,
 }
 
 // ── Batch types ───────────────────────────────────────────────────────────────
@@ -262,8 +264,7 @@ fn export_single_item(
 }
 
 /// Composite each layer of a `WatermarkPreset` onto `base_rgba` in order.
-/// Rotation is in the data model but not applied (same compromise as Phase 5A
-/// for image layers). Phase 5 polish will add rotation support.
+/// Rotation is applied by snapping to the nearest 90° increment (v1).
 pub fn apply_watermark_preset(
     base_rgba: &mut [u8],
     base_w: u32,
@@ -279,6 +280,7 @@ pub fn apply_watermark_preset(
                     size_pct: img_layer.size_pct,
                     opacity: img_layer.opacity,
                     margin_pct: img_layer.margin_pct,
+                    rotation_deg: img_layer.rotation_deg,
                 };
                 apply_watermark(base_rgba, base_w, base_h, &stamp)?;
             }
@@ -302,6 +304,12 @@ fn apply_text_layer(
     let text_img = match crate::text::rasterise_text(&layer.text, px_size, color) {
         Some(img) => img,
         None => return Ok(()), // empty text or font failure — silently skip
+    };
+    // Apply rotation BEFORE positioning; re-read dimensions in case 90°/270° swaps them.
+    let text_img = if layer.rotation_deg.abs() > 0.1 {
+        rotate_image(&text_img, layer.rotation_deg)
+    } else {
+        text_img
     };
     let (new_w, new_h) = text_img.dimensions();
     let margin = (layer.margin_pct / 100.0 * long_edge).round() as i64;
@@ -390,6 +398,14 @@ fn apply_watermark(
     let resized =
         image::imageops::resize(&wm, new_w, new_h, image::imageops::FilterType::Triangle);
 
+    // Apply rotation BEFORE positioning; re-read dimensions in case 90°/270° swaps them.
+    let resized = if stamp.rotation_deg.abs() > 0.1 {
+        rotate_image(&resized, stamp.rotation_deg)
+    } else {
+        resized
+    };
+    let (new_w, new_h) = resized.dimensions();
+
     let margin = (stamp.margin_pct / 100.0 * long_edge).round() as i64;
     let (anchor_x, anchor_y) = match stamp.anchor {
         WatermarkAnchor::TopLeft => (margin, margin),
@@ -434,6 +450,24 @@ fn apply_watermark(
         }
     }
     Ok(())
+}
+
+// ── Rotation helper ───────────────────────────────────────────────────────────
+
+/// Rotate an RGBA image by the nearest multiple of 90°.
+///
+/// Snaps `angle_deg` to the nearest 90° increment (0, 90, 180, 270) and applies
+/// the corresponding lossless `image::imageops` rotation.  Arbitrary-angle
+/// bilinear rotation is a follow-up (most watermarks are placed at axis-aligned
+/// angles anyway).
+pub fn rotate_image(img: &image::RgbaImage, angle_deg: f32) -> image::RgbaImage {
+    let snapped = ((angle_deg / 90.0).round() as i32).rem_euclid(4);
+    match snapped {
+        1 => image::imageops::rotate90(img),
+        2 => image::imageops::rotate180(img),
+        3 => image::imageops::rotate270(img),
+        _ => img.clone(),
+    }
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

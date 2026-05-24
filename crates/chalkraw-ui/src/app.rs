@@ -308,6 +308,7 @@ impl WatermarkDialogState {
             size_pct: self.size_pct,
             opacity: self.opacity_pct / 100.0,
             margin_pct: self.margin_pct,
+            rotation_deg: 0.0,
         })
     }
 }

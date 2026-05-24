@@ -26,7 +26,7 @@ pub struct ImageLayer {
     pub opacity: f32,
     /// Percent of output long edge (0..20).
     pub margin_pct: f32,
-    /// -180..180. Not applied in Phase 5A; placeholder for Phase 5 polish.
+    /// -180..180. Applied at composition; snapped to nearest 90° increment (v1).
     pub rotation_deg: f32,
 }
 
@@ -69,8 +69,7 @@ pub struct TextLayer {
     pub opacity: f32,
     /// Percent of output long edge (0..20).
     pub margin_pct: f32,
-    /// -180..180. NOT applied in Phase 5B (data model placeholder, same
-    /// compromise as image layer's rotation_deg).
+    /// -180..180. Applied at composition; snapped to nearest 90° increment (v1).
     pub rotation_deg: f32,
 }
 

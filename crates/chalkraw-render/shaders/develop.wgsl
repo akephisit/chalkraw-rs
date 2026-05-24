@@ -305,11 +305,31 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     rgb.b *= 1.0 - delta_k * 0.5;
     rgb.g *= 1.0 + edit.tint / 100.0 * 0.3;
 
-    // 2. Exposure — multiply linear by 2^stops.
-    rgb *= pow(2.0, edit.exposure);
+    // 2. Exposure with highlight roll-off (Reinhard-style soft compression above 0.9).
+    //    Below 0.9 the formula is identity, preserving accuracy for the mid-tones/shadows.
+    //    Above 0.9 highlights compress toward 1.0 instead of hard-clipping.
+    let exposure_gain = pow(2.0, edit.exposure);
+    let exposed = rgb * exposure_gain;
+    let above = max(exposed - vec3<f32>(0.9), vec3<f32>(0.0));
+    rgb = exposed - above * (1.0 - 1.0 / (1.0 + above * 2.0));
 
-    // 3. Contrast — pivot around 0.5 in linear light.
-    rgb = (rgb - 0.5) * (1.0 + edit.contrast / 100.0) + 0.5;
+    // 3. Contrast — tanh S-curve blended with identity around midgrey (0.5).
+    //    At contrast=0 the result is exactly the identity (mix factor = 0).
+    //    At positive contrast, the tanh S-curve compresses extremes toward 0/1 smoothly.
+    //    Normalised so that rgb=0 and rgb=1 are preserved at the curve ends.
+    let contrast_k = edit.contrast / 100.0;
+    let centred = rgb - vec3<f32>(0.5);
+    let slope_c = 1.0 + abs(contrast_k) * 2.0;
+    // Normalise by tanh(0.5 * slope_c) so centred=±0.5 maps to ±0.5 (black/white preserved).
+    let norm_c = tanh(0.5 * slope_c);
+    let s_shaped = vec3<f32>(
+        tanh(centred.r * slope_c) / norm_c,
+        tanh(centred.g * slope_c) / norm_c,
+        tanh(centred.b * slope_c) / norm_c,
+    ) * 0.5;
+    // Blend: contrast_k=0 → pure identity; contrast_k=±1 → full S-curve.
+    let shaped = mix(centred, s_shaped, abs(contrast_k));
+    rgb = vec3<f32>(0.5) + shaped;
 
     // 4. Highlights / Shadows / Whites / Blacks — luminance-weighted gains.
     let lum = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -503,11 +523,23 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         rgb = rgb + mixed_detail * (edit.sharpening_amount / 150.0) * mask;
     }
 
-    // 7. Vibrance — saturation boost weighted against already-saturated colours.
+    // 7. Vibrance — saturation boost weighted against already-saturated colours,
+    //    with skin-tone protection (orange/yellow hues ~30° get only 30% of the boost).
     let max_c = max(max(rgb.r, rgb.g), rgb.b);
     let min_c = min(min(rgb.r, rgb.g), rgb.b);
     let cur_sat = max_c - min_c;
-    let vib_weight = 1.0 - clamp(cur_sat, 0.0, 1.0);
+    var vib_weight = 1.0 - clamp(cur_sat, 0.0, 1.0);
+
+    // Skin-tone protection: detect orange/yellow tones (hue ~30°) and reduce boost.
+    let vib_hsv = rgb_to_hsv(rgb);
+    let vib_hue_deg = vib_hsv.x * 360.0;
+    // Smallest circular distance to hue=30° (skin/orange).
+    let skin_dist = min(abs(vib_hue_deg - 30.0), 360.0 - abs(vib_hue_deg - 30.0));
+    // skin_factor: 0 at hue=30° (skin), 1 at hues >30° away — blended over a 30° band.
+    let skin_factor = smoothstep(0.0, 30.0, skin_dist);
+    // Skin hues get 30% of the vibrance boost; all other hues get 100%.
+    vib_weight = vib_weight * mix(0.3, 1.0, skin_factor);
+
     let gray_vib = vec3<f32>(dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722)));
     rgb = mix(gray_vib, rgb, 1.0 + edit.vibrance / 100.0 * vib_weight);
 
