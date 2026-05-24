@@ -11,7 +11,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.17.1"
+version = "0.18.0"
 license = "MIT OR Apache-2.0"
 rust-version = "1.92"
 
@@ -38,6 +38,7 @@ ab_glyph = "0.2"
 image = "0.25"
 rawloader = "0.37"
 kamadak-exif = "0.6"
+qcms = "0.3"
 
 # DB
 redb = "4.1"

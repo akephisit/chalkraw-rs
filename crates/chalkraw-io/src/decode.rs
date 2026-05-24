@@ -275,23 +275,97 @@ pub(crate) fn apply_orientation(img: image::RgbaImage, orientation: u32) -> imag
     }
 }
 
-/// Log the presence of an embedded ICC profile in a JPEG file.
-/// Full ICC colour management is deferred to a dedicated phase; this log
-/// helps diagnose "colours look different from source" reports.
-fn log_icc_profile_if_present(path: &Path) {
+/// Read the embedded ICC profile bytes from a JPEG, PNG, or TIFF file.
+/// Returns `None` if no profile is present or the file cannot be opened.
+fn read_icc_profile(path: &Path) -> Option<Vec<u8>> {
+    use image::ImageDecoder;
+
+    // Try JPEG first — the most common case.
     if let Ok(file) = std::fs::File::open(path) {
         let reader = std::io::BufReader::new(file);
         if let Ok(mut decoder) = image::codecs::jpeg::JpegDecoder::new(reader) {
-            use image::ImageDecoder;
             if let Ok(Some(icc)) = decoder.icc_profile() {
-                log::info!(
-                    "decode_image {path:?}: ICC profile present ({} bytes), treating as sRGB — \
-                     full ICC colour management deferred to a future phase",
-                    icc.len()
-                );
+                return Some(icc);
             }
         }
     }
+
+    // PNG.
+    if let Ok(file) = std::fs::File::open(path) {
+        let reader = std::io::BufReader::new(file);
+        if let Ok(mut decoder) = image::codecs::png::PngDecoder::new(reader) {
+            if let Ok(Some(icc)) = decoder.icc_profile() {
+                return Some(icc);
+            }
+        }
+    }
+
+    // TIFF.
+    if let Ok(file) = std::fs::File::open(path) {
+        let reader = std::io::BufReader::new(file);
+        if let Ok(mut decoder) = image::codecs::tiff::TiffDecoder::new(reader) {
+            if let Ok(Some(icc)) = decoder.icc_profile() {
+                return Some(icc);
+            }
+        }
+    }
+
+    None
+}
+
+/// Apply the embedded ICC profile to convert pixels to sRGB in-place.
+///
+/// If no profile is present, or it is already sRGB, the function returns
+/// without modifying `rgba`.  A qcms transform is applied when a non-sRGB
+/// embedded profile is detected, mapping the pixel data to sRGB before the
+/// subsequent linear-light conversion.
+fn convert_icc_to_srgb(path: &Path, rgba: &mut image::RgbaImage) {
+    let icc_bytes = match read_icc_profile(path) {
+        Some(b) => b,
+        None => return,
+    };
+
+    // Parse the embedded profile.
+    let src_profile = match qcms::Profile::new_from_slice(&icc_bytes, true) {
+        Some(p) => p,
+        None => {
+            log::warn!(
+                "decode_image {path:?}: embedded ICC profile could not be parsed, treating as sRGB"
+            );
+            return;
+        }
+    };
+
+    // Fast path: skip transform when the source is already sRGB.
+    if src_profile.is_sRGB() {
+        log::debug!("decode_image {path:?}: embedded ICC profile is sRGB — no transform needed");
+        return;
+    }
+
+    let dst_profile = qcms::Profile::new_sRGB();
+
+    let transform = match qcms::Transform::new_to(
+        &src_profile,
+        &dst_profile,
+        qcms::DataType::RGBA8,
+        qcms::DataType::RGBA8,
+        qcms::Intent::Perceptual,
+    ) {
+        Some(t) => t,
+        None => {
+            log::warn!(
+                "decode_image {path:?}: ICC→sRGB transform creation failed, treating as sRGB"
+            );
+            return;
+        }
+    };
+
+    log::info!(
+        "decode_image {path:?}: applying embedded ICC profile ({} bytes) → sRGB transform",
+        icc_bytes.len()
+    );
+    transform.apply(rgba.as_mut());
+    // qcms operates in-place on the flat RGBA byte slice; rgba is now sRGB.
 }
 
 pub fn decode_image(path: impl AsRef<Path>) -> Result<LinearImage, IoError> {
@@ -302,10 +376,6 @@ pub fn decode_image(path: impl AsRef<Path>) -> Result<LinearImage, IoError> {
     if let Some(raw_format) = raw_format_from_extension(&path) {
         return decode_raw(path, raw_format);
     }
-
-    // Issue 3: log ICC profile presence so users can confirm the cause of
-    // colour differences when their camera embeds a non-sRGB profile.
-    log_icc_profile_if_present(&path);
 
     let reader = ImageReader::open(&path)
         .map_err(|e| match e.kind() {
@@ -321,7 +391,10 @@ pub fn decode_image(path: impl AsRef<Path>) -> Result<LinearImage, IoError> {
 
     // Issue 1: apply EXIF orientation before converting to linear.
     let orientation = read_exif_orientation(&path);
-    let rgba8 = apply_orientation(rgba8, orientation);
+    let mut rgba8 = apply_orientation(rgba8, orientation);
+
+    // Phase 8: convert embedded ICC profile → sRGB before linearisation.
+    convert_icc_to_srgb(&path, &mut rgba8);
 
     let (w, h) = rgba8.dimensions();
     Ok(LinearImage { width: w, height: h, format, pixels: to_linear(&rgba8) })
@@ -547,5 +620,39 @@ mod tests {
             jpeg.ends_with(&[0xFF, 0xD9]),
             "should end with EOI"
         );
+    }
+
+    /// Regression: ICC path must not break decode of a profile-less JPEG.
+    #[test]
+    fn decode_no_icc_jpeg_unchanged() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/sample.jpg");
+        let img = decode_image(path).expect("decode failed");
+        assert_eq!(img.width, 1024);
+        assert_eq!(img.height, 768);
+        // Alpha must be 1.0 throughout.
+        for px in img.pixels.chunks_exact(4) {
+            assert!((px[3] - 1.0).abs() < 1e-6, "alpha must be 1.0, got {}", px[3]);
+        }
+    }
+
+    /// An sRGB→sRGB qcms transform must leave pixel values unchanged.
+    #[test]
+    fn qcms_srgb_to_srgb_is_identity() {
+        let src = qcms::Profile::new_sRGB();
+        let dst = qcms::Profile::new_sRGB();
+        let xfm = qcms::Transform::new_to(
+            &src,
+            &dst,
+            qcms::DataType::RGBA8,
+            qcms::DataType::RGBA8,
+            qcms::Intent::Perceptual,
+        )
+        .expect("sRGB→sRGB transform must succeed");
+
+        let original = vec![128u8, 64, 32, 255, 200, 100, 50, 255];
+        let mut pixels = original.clone();
+        xfm.apply(&mut pixels);
+        // sRGB→sRGB with perceptual intent should round-trip cleanly.
+        assert_eq!(pixels, original, "sRGB→sRGB transform must be a no-op");
     }
 }
