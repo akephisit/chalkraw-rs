@@ -1,6 +1,65 @@
 use chalkraw_core::EditState;
 use egui::Ui;
 
+// ── Scroll-aware slider helpers ───────────────────────────────────────────────
+
+/// Wrap an egui Slider with mouse-wheel-while-hovered support. Returns true if
+/// the value changed (either by drag, keyboard, or scroll wheel).
+fn slider_scroll(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    decimals: usize,
+) -> bool {
+    let slider = egui::Slider::new(value, range.clone()).fixed_decimals(decimals);
+    let response = ui.add(slider);
+    let mut changed = response.changed();
+    if response.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 {
+            let span = range.end() - range.start();
+            let direction = if scroll > 0.0 { 1.0_f32 } else { -1.0 };
+            // One scroll notch ≈ 1% of the range, scaled by the actual magnitude.
+            let step = (scroll.abs() / 50.0).max(0.01) * span * 0.01;
+            let new_val = (*value + direction * step).clamp(*range.start(), *range.end());
+            if (new_val - *value).abs() > f32::EPSILON {
+                *value = new_val;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Variant with a suffix (e.g. "°", " K", " px").
+fn slider_scroll_suffix(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    decimals: usize,
+    suffix: &str,
+) -> bool {
+    let slider = egui::Slider::new(value, range.clone()).fixed_decimals(decimals).suffix(suffix);
+    let response = ui.add(slider);
+    let mut changed = response.changed();
+    if response.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 {
+            let span = range.end() - range.start();
+            let direction = if scroll > 0.0 { 1.0_f32 } else { -1.0 };
+            let step = (scroll.abs() / 50.0).max(0.01) * span * 0.01;
+            let new_val = (*value + direction * step).clamp(*range.start(), *range.end());
+            if (new_val - *value).abs() > f32::EPSILON {
+                *value = new_val;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+// ── Panels ────────────────────────────────────────────────────────────────────
+
 pub fn left_panel(ui: &mut Ui, state: &mut crate::app::AppState) -> bool {
     let mut changed = false;
 
@@ -91,55 +150,32 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
         .show(ui, |ui| {
             // White Balance — shown first, matching Lightroom order.
             ui.label("Temp (K)");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.white_balance.temp_kelvin, 2000.0..=10000.0)
-                    .fixed_decimals(0)
-                    .suffix(" K"),
-            ).changed();
+            changed |= slider_scroll_suffix(
+                ui, &mut edit.white_balance.temp_kelvin, 2000.0..=10000.0, 0, " K",
+            );
 
             ui.label("Tint");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.white_balance.tint, -100.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.white_balance.tint, -100.0..=100.0, 0);
 
             ui.add_space(4.0);
 
             ui.label("Exposure");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.tone.exposure, -5.0..=5.0)
-                    .fixed_decimals(2),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.tone.exposure, -5.0..=5.0, 2);
 
             ui.label("Contrast");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.tone.contrast, -100.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.tone.contrast, -100.0..=100.0, 0);
 
             ui.label("Highlights");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.tone.highlights, -100.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.tone.highlights, -100.0..=100.0, 0);
 
             ui.label("Shadows");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.tone.shadows, -100.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.tone.shadows, -100.0..=100.0, 0);
 
             ui.label("Whites");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.tone.whites, -100.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.tone.whites, -100.0..=100.0, 0);
 
             ui.label("Blacks");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.tone.blacks, -100.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.tone.blacks, -100.0..=100.0, 0);
         });
 
     // ── Presence (multi-pass — Phase 2E) ─────────────────────────────────────
@@ -147,11 +183,11 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
         .default_open(false)
         .show(ui, |ui| {
             ui.label("Texture");
-            if ui.add(egui::Slider::new(&mut edit.presence.texture, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+            if slider_scroll(ui, &mut edit.presence.texture, -100.0..=100.0, 0) { changed = true; }
             ui.label("Clarity");
-            if ui.add(egui::Slider::new(&mut edit.presence.clarity, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+            if slider_scroll(ui, &mut edit.presence.clarity, -100.0..=100.0, 0) { changed = true; }
             ui.label("Dehaze");
-            if ui.add(egui::Slider::new(&mut edit.presence.dehaze, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+            if slider_scroll(ui, &mut edit.presence.dehaze, -100.0..=100.0, 0) { changed = true; }
         });
 
     // ── Color ─────────────────────────────────────────────────────────────────
@@ -159,16 +195,10 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
         .default_open(true)
         .show(ui, |ui| {
             ui.label("Vibrance");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.color.vibrance, -100.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.color.vibrance, -100.0..=100.0, 0);
 
             ui.label("Saturation");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.color.saturation, -100.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.color.saturation, -100.0..=100.0, 0);
         });
 
     // ── Tone Curve (Phase 2D) ─────────────────────────────────────────────────
@@ -180,13 +210,13 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
                 .default_open(true)
                 .show(ui, |ui| {
                     ui.label("Highlights");
-                    if ui.add(egui::Slider::new(&mut edit.parametric_curve.highlights, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    if slider_scroll(ui, &mut edit.parametric_curve.highlights, -100.0..=100.0, 0) { changed = true; }
                     ui.label("Lights");
-                    if ui.add(egui::Slider::new(&mut edit.parametric_curve.lights, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    if slider_scroll(ui, &mut edit.parametric_curve.lights, -100.0..=100.0, 0) { changed = true; }
                     ui.label("Darks");
-                    if ui.add(egui::Slider::new(&mut edit.parametric_curve.darks, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    if slider_scroll(ui, &mut edit.parametric_curve.darks, -100.0..=100.0, 0) { changed = true; }
                     ui.label("Shadows");
-                    if ui.add(egui::Slider::new(&mut edit.parametric_curve.shadows, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    if slider_scroll(ui, &mut edit.parametric_curve.shadows, -100.0..=100.0, 0) { changed = true; }
                 });
             ui.add_space(4.0);
             ui.label("Point curve editor — coming in a later polish phase");
@@ -213,24 +243,15 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
                     .default_open(false)
                     .show(ui, |ui| {
                         ui.label("Hue");
-                        if ui.add(
-                            egui::Slider::new(&mut edit.hsl[i].hue, -100.0..=100.0)
-                                .fixed_decimals(0),
-                        ).changed() {
+                        if slider_scroll(ui, &mut edit.hsl[i].hue, -100.0..=100.0, 0) {
                             changed = true;
                         }
                         ui.label("Saturation");
-                        if ui.add(
-                            egui::Slider::new(&mut edit.hsl[i].saturation, -100.0..=100.0)
-                                .fixed_decimals(0),
-                        ).changed() {
+                        if slider_scroll(ui, &mut edit.hsl[i].saturation, -100.0..=100.0, 0) {
                             changed = true;
                         }
                         ui.label("Luminance");
-                        if ui.add(
-                            egui::Slider::new(&mut edit.hsl[i].luminance, -100.0..=100.0)
-                                .fixed_decimals(0),
-                        ).changed() {
+                        if slider_scroll(ui, &mut edit.hsl[i].luminance, -100.0..=100.0, 0) {
                             changed = true;
                         }
                     });
@@ -247,11 +268,11 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
                 .default_open(false)
                 .show(ui, |ui| {
                     ui.label("Hue");
-                    if ui.add(egui::Slider::new(&mut edit.color_grading.shadows.hue, 0.0..=360.0).fixed_decimals(0).suffix("°")).changed() { changed = true; }
+                    if slider_scroll_suffix(ui, &mut edit.color_grading.shadows.hue, 0.0..=360.0, 0, "°") { changed = true; }
                     ui.label("Saturation");
-                    if ui.add(egui::Slider::new(&mut edit.color_grading.shadows.saturation, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    if slider_scroll(ui, &mut edit.color_grading.shadows.saturation, 0.0..=100.0, 0) { changed = true; }
                     ui.label("Luminance");
-                    if ui.add(egui::Slider::new(&mut edit.color_grading.shadows.luminance, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    if slider_scroll(ui, &mut edit.color_grading.shadows.luminance, -100.0..=100.0, 0) { changed = true; }
                 });
             // Midtones
             egui::CollapsingHeader::new("Midtones")
@@ -259,11 +280,11 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
                 .default_open(false)
                 .show(ui, |ui| {
                     ui.label("Hue");
-                    if ui.add(egui::Slider::new(&mut edit.color_grading.midtones.hue, 0.0..=360.0).fixed_decimals(0).suffix("°")).changed() { changed = true; }
+                    if slider_scroll_suffix(ui, &mut edit.color_grading.midtones.hue, 0.0..=360.0, 0, "°") { changed = true; }
                     ui.label("Saturation");
-                    if ui.add(egui::Slider::new(&mut edit.color_grading.midtones.saturation, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    if slider_scroll(ui, &mut edit.color_grading.midtones.saturation, 0.0..=100.0, 0) { changed = true; }
                     ui.label("Luminance");
-                    if ui.add(egui::Slider::new(&mut edit.color_grading.midtones.luminance, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    if slider_scroll(ui, &mut edit.color_grading.midtones.luminance, -100.0..=100.0, 0) { changed = true; }
                 });
             // Highlights
             egui::CollapsingHeader::new("Highlights")
@@ -271,11 +292,11 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
                 .default_open(false)
                 .show(ui, |ui| {
                     ui.label("Hue");
-                    if ui.add(egui::Slider::new(&mut edit.color_grading.highlights.hue, 0.0..=360.0).fixed_decimals(0).suffix("°")).changed() { changed = true; }
+                    if slider_scroll_suffix(ui, &mut edit.color_grading.highlights.hue, 0.0..=360.0, 0, "°") { changed = true; }
                     ui.label("Saturation");
-                    if ui.add(egui::Slider::new(&mut edit.color_grading.highlights.saturation, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    if slider_scroll(ui, &mut edit.color_grading.highlights.saturation, 0.0..=100.0, 0) { changed = true; }
                     ui.label("Luminance");
-                    if ui.add(egui::Slider::new(&mut edit.color_grading.highlights.luminance, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    if slider_scroll(ui, &mut edit.color_grading.highlights.luminance, -100.0..=100.0, 0) { changed = true; }
                 });
             // Global
             egui::CollapsingHeader::new("Global")
@@ -283,17 +304,17 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
                 .default_open(false)
                 .show(ui, |ui| {
                     ui.label("Hue");
-                    if ui.add(egui::Slider::new(&mut edit.color_grading.global.hue, 0.0..=360.0).fixed_decimals(0).suffix("°")).changed() { changed = true; }
+                    if slider_scroll_suffix(ui, &mut edit.color_grading.global.hue, 0.0..=360.0, 0, "°") { changed = true; }
                     ui.label("Saturation");
-                    if ui.add(egui::Slider::new(&mut edit.color_grading.global.saturation, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    if slider_scroll(ui, &mut edit.color_grading.global.saturation, 0.0..=100.0, 0) { changed = true; }
                     ui.label("Luminance");
-                    if ui.add(egui::Slider::new(&mut edit.color_grading.global.luminance, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+                    if slider_scroll(ui, &mut edit.color_grading.global.luminance, -100.0..=100.0, 0) { changed = true; }
                 });
             ui.separator();
             ui.label("Blending");
-            if ui.add(egui::Slider::new(&mut edit.color_grading.blending, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+            if slider_scroll(ui, &mut edit.color_grading.blending, 0.0..=100.0, 0) { changed = true; }
             ui.label("Balance");
-            if ui.add(egui::Slider::new(&mut edit.color_grading.balance, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+            if slider_scroll(ui, &mut edit.color_grading.balance, -100.0..=100.0, 0) { changed = true; }
         });
 
     // ── Detail (Phase 2E) ─────────────────────────────────────────────────────
@@ -302,9 +323,9 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
         .show(ui, |ui| {
             ui.strong("Sharpening");
             ui.label("Amount");
-            if ui.add(egui::Slider::new(&mut edit.detail.sharpening.amount, 0.0..=150.0).fixed_decimals(0)).changed() { changed = true; }
+            if slider_scroll(ui, &mut edit.detail.sharpening.amount, 0.0..=150.0, 0) { changed = true; }
             ui.label("Radius");
-            if ui.add(egui::Slider::new(&mut edit.detail.sharpening.radius, 0.5..=3.0).fixed_decimals(1).suffix(" px")).changed() { changed = true; }
+            if slider_scroll_suffix(ui, &mut edit.detail.sharpening.radius, 0.5..=3.0, 1, " px") { changed = true; }
             ui.add_space(4.0);
             ui.label("Detail (Phase 2E.2 polish)");
             ui.add_enabled(false, egui::Slider::new(&mut edit.detail.sharpening.detail, 0.0..=100.0));
@@ -313,9 +334,9 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
             ui.add_space(4.0);
             ui.strong("Noise Reduction");
             ui.label("Noise Reduction Luminance");
-            if ui.add(egui::Slider::new(&mut edit.detail.noise_reduction.luminance, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+            if slider_scroll(ui, &mut edit.detail.noise_reduction.luminance, 0.0..=100.0, 0) { changed = true; }
             ui.label("Noise Reduction Color");
-            if ui.add(egui::Slider::new(&mut edit.detail.noise_reduction.color, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+            if slider_scroll(ui, &mut edit.detail.noise_reduction.color, 0.0..=100.0, 0) { changed = true; }
         });
 
     // ── Effects ───────────────────────────────────────────────────────────────
@@ -324,42 +345,24 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
         .show(ui, |ui| {
             ui.strong("Vignette");
             ui.label("Amount");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.effects.vignette.amount, -100.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.effects.vignette.amount, -100.0..=100.0, 0);
 
             ui.label("Midpoint");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.effects.vignette.midpoint, 0.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.effects.vignette.midpoint, 0.0..=100.0, 0);
 
             ui.label("Feather");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.effects.vignette.feather, 0.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.effects.vignette.feather, 0.0..=100.0, 0);
 
             ui.label("Roundness");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.effects.vignette.roundness, -100.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.effects.vignette.roundness, -100.0..=100.0, 0);
 
             ui.add_space(6.0);
             ui.strong("Grain");
             ui.label("Amount");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.effects.grain.amount, 0.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.effects.grain.amount, 0.0..=100.0, 0);
 
             ui.label("Size");
-            changed |= ui.add(
-                egui::Slider::new(&mut edit.effects.grain.size, 0.0..=100.0)
-                    .fixed_decimals(0),
-            ).changed();
+            changed |= slider_scroll(ui, &mut edit.effects.grain.size, 0.0..=100.0, 0);
 
             ui.label("Roughness");
             // Roughness is wired through the uniform buffer but has no shader
@@ -371,7 +374,28 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
             );
             let roughness_changed = roughness_resp.changed();
             roughness_resp.on_hover_text("Roughness (multi-octave noise — Phase 2E)");
-            changed |= roughness_changed;
+            if roughness_changed {
+                // Also handle scroll for roughness — we need the response first
+                // for the tooltip, so the scroll logic runs after.
+                changed = true;
+            }
+            // Scroll support for roughness (manually, since we needed the response for tooltip)
+            {
+                let hovered = ui.rect_contains_pointer(ui.min_rect());
+                if hovered {
+                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                    if scroll != 0.0 {
+                        let span = 100.0_f32;
+                        let direction = if scroll > 0.0 { 1.0_f32 } else { -1.0 };
+                        let step = (scroll.abs() / 50.0).max(0.01) * span * 0.01;
+                        let new_val = (edit.effects.grain.roughness + direction * step).clamp(0.0, 100.0);
+                        if (new_val - edit.effects.grain.roughness).abs() > f32::EPSILON {
+                            edit.effects.grain.roughness = new_val;
+                            changed = true;
+                        }
+                    }
+                }
+            }
         });
 
     // ── Lens Correction (Phase 2F) ────────────────────────────────────────────
@@ -379,9 +403,9 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
         .default_open(false)
         .show(ui, |ui| {
             ui.label("Distortion");
-            if ui.add(egui::Slider::new(&mut edit.lens_correction.distortion, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+            if slider_scroll(ui, &mut edit.lens_correction.distortion, -100.0..=100.0, 0) { changed = true; }
             ui.label("Vignetting (correction)");
-            if ui.add(egui::Slider::new(&mut edit.lens_correction.vignetting, 0.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+            if slider_scroll(ui, &mut edit.lens_correction.vignetting, 0.0..=100.0, 0) { changed = true; }
         });
 
     // ── Geometry / Crop (Phase 2F) ────────────────────────────────────────────
@@ -401,15 +425,15 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
             }
             if let Some(crop) = edit.crop.as_mut() {
                 ui.label("X");
-                if ui.add(egui::Slider::new(&mut crop.x_pct, 0.0..=1.0).fixed_decimals(2)).changed() { changed = true; }
+                if slider_scroll(ui, &mut crop.x_pct, 0.0..=1.0, 2) { changed = true; }
                 ui.label("Y");
-                if ui.add(egui::Slider::new(&mut crop.y_pct, 0.0..=1.0).fixed_decimals(2)).changed() { changed = true; }
+                if slider_scroll(ui, &mut crop.y_pct, 0.0..=1.0, 2) { changed = true; }
                 ui.label("Width");
-                if ui.add(egui::Slider::new(&mut crop.w_pct, 0.01..=1.0).fixed_decimals(2)).changed() { changed = true; }
+                if slider_scroll(ui, &mut crop.w_pct, 0.01..=1.0, 2) { changed = true; }
                 ui.label("Height");
-                if ui.add(egui::Slider::new(&mut crop.h_pct, 0.01..=1.0).fixed_decimals(2)).changed() { changed = true; }
+                if slider_scroll(ui, &mut crop.h_pct, 0.01..=1.0, 2) { changed = true; }
                 ui.label("Rotation");
-                if ui.add(egui::Slider::new(&mut crop.rotation_deg, -45.0..=45.0).fixed_decimals(1).suffix("°")).changed() { changed = true; }
+                if slider_scroll_suffix(ui, &mut crop.rotation_deg, -45.0..=45.0, 1, "°") { changed = true; }
             }
             ui.add_space(4.0);
             ui.label("Drag-rectangle crop UI — coming with Phase 3 import flow");

@@ -206,7 +206,15 @@ impl AppState {
             if only_picks && p.flag != Flag::Pick {
                 continue;
             }
+            if p.original_path.as_os_str() == "<embedded>" {
+                log::warn!(
+                    "skip embedded fixture photo {}: cannot export embedded image",
+                    p.id
+                );
+                continue;
+            }
             if !p.original_path.exists() {
+                log::warn!("skip {:?}: file not found at original_path", p.original_path);
                 continue;
             }
             let edit = self.catalog.get_edit(p.id)?;
@@ -221,6 +229,11 @@ impl AppState {
                 original_name,
             });
         }
+        log::info!(
+            "export filter: only_picks={only_picks}, catalog has {} photos; selected {} for export",
+            self.catalog.list_photos()?.len(),
+            items.len()
+        );
         Ok(items)
     }
 }
@@ -495,20 +508,9 @@ impl eframe::App for ChalkrawApp {
         });
 
         egui::SidePanel::right("right").default_width(280.0).show(ctx, |ui| {
-            // Disable mouse-wheel scrolling on the ScrollArea so that scroll
-            // events are delivered to hovered Sliders instead of consumed by
-            // the panel.  The scroll bar and drag-to-scroll remain active so
-            // the panel is still scrollable when its content overflows.
-            let scroll_source = egui::scroll_area::ScrollSource {
-                scroll_bar: true,
-                drag: true,
-                mouse_wheel: false,
-            };
-            egui::ScrollArea::vertical()
-                .scroll_source(scroll_source)
-                .show(ui, |ui| {
-                    edit_changed |= right_panel(ui, &mut self.state.edit);
-                });
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                edit_changed |= right_panel(ui, &mut self.state.edit);
+            });
         });
 
         egui::TopBottomPanel::bottom("filmstrip").default_height(120.0).show(ctx, |ui| {

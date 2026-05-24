@@ -4,6 +4,46 @@ use chalkraw_io::decode_image;
 use chalkraw_render::RenderDevice;
 use std::path::PathBuf;
 
+/// Smoke test: exporting with clarity=100 produces pixels that differ from
+/// clarity=0. Proves that the Phase 2E blur passes are actually running in
+/// export_current (they were silently zero before v0.15.4).
+#[test]
+fn clarity_affects_exported_pixels() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skip: no GPU"); return; }
+    };
+    let img = decode_image(fixture_path()).unwrap();
+
+    // Export with clarity = 0 (baseline).
+    let tmp0 = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
+    let edit0 = EditState::default(); // clarity defaults to 0
+    export_current(&rd, &img, &edit0, tmp0.path(), ExportOptions {
+        format: ExportFormat::Png,
+        resize: ExportResize::LongEdge(128),
+    }).unwrap();
+
+    // Export with clarity = 100.
+    let tmp100 = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
+    let mut edit100 = EditState::default();
+    edit100.presence.clarity = 100.0;
+    export_current(&rd, &img, &edit100, tmp100.path(), ExportOptions {
+        format: ExportFormat::Png,
+        resize: ExportResize::LongEdge(128),
+    }).unwrap();
+
+    let pixels0   = image::open(tmp0.path()).unwrap().to_rgb8().into_raw();
+    let pixels100 = image::open(tmp100.path()).unwrap().to_rgb8().into_raw();
+
+    // At least some pixels must differ; if every pixel is identical the blur
+    // passes are still not running.
+    let differing = pixels0.iter().zip(pixels100.iter()).filter(|(a, b)| a != b).count();
+    assert!(
+        differing > 0,
+        "clarity=100 and clarity=0 exports are identical — Phase 2E blurs are not running in export"
+    );
+}
+
 fn fixture_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop(); p.pop();

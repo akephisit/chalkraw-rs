@@ -3,8 +3,8 @@
 use chalkraw_core::EditState;
 use chalkraw_io::LinearImage;
 use chalkraw_render::{
-    make_target, read_to_cpu, DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice,
-    SourceTexture,
+    make_target, read_to_cpu, BlurPipeline, create_pingpong, DevelopPipeline, EditUniforms,
+    PipelineConfig, RenderDevice, SourceTexture,
 };
 use std::path::{Path, PathBuf};
 
@@ -114,9 +114,29 @@ pub fn export_current(
         output_format: wgpu::TextureFormat::Rgba8UnormSrgb,
     });
     pipeline.update_uniforms(&EditUniforms::from(edit));
-    // Pass source.view for all blur views: export does not exercise Clarity,
-    // Sharpening, Texture, or NR so those terms are zero with sliders at 0.
-    let bind_group = pipeline.make_bind_group(&source, &source.view, &source.view, &source.view, &source.view);
+
+    // Run the four separable blur pairs that Phase 2E requires. These mirror
+    // what the UI canvas does on every edit change. Skipping them causes
+    // Clarity, Texture, Sharpening, NR, and Dehaze to contribute nothing to
+    // the exported file. Each pair adds ~4-6ms per 24MP pass; total overhead
+    // for the eight passes is ~30-50ms per photo — acceptable for export.
+    let blur = BlurPipeline::new(rd);
+    let (_, clarity_a, _, clarity_b) = create_pingpong(rd, image.width, image.height);
+    let (_, sharp_a, _, sharp_b) = create_pingpong(rd, image.width, image.height);
+    let (_, texture_a, _, texture_b) = create_pingpong(rd, image.width, image.height);
+    let (_, nr_a, _, nr_b) = create_pingpong(rd, image.width, image.height);
+
+    let sharp_sigma = edit.detail.sharpening.radius.max(0.5);
+    blur.render_pass(&source.view, &clarity_a,  image.width, image.height, true,  16.0);
+    blur.render_pass(&clarity_a,   &clarity_b,  image.width, image.height, false, 16.0);
+    blur.render_pass(&source.view, &sharp_a,    image.width, image.height, true,  sharp_sigma);
+    blur.render_pass(&sharp_a,     &sharp_b,    image.width, image.height, false, sharp_sigma);
+    blur.render_pass(&source.view, &texture_a,  image.width, image.height, true,  5.0);
+    blur.render_pass(&texture_a,   &texture_b,  image.width, image.height, false, 5.0);
+    blur.render_pass(&source.view, &nr_a,       image.width, image.height, true,  2.0);
+    blur.render_pass(&nr_a,        &nr_b,       image.width, image.height, false, 2.0);
+
+    let bind_group = pipeline.make_bind_group(&source, &clarity_b, &sharp_b, &texture_b, &nr_b);
 
     let (target, view) = make_target(rd, out_w, out_h);
     pipeline.render(&view, &bind_group);
@@ -193,9 +213,27 @@ fn export_single_item(
         output_format: wgpu::TextureFormat::Rgba8UnormSrgb,
     });
     pipeline.update_uniforms(&EditUniforms::from(&item.edit));
-    // Pass source.view for all blur views: batch export does not exercise Clarity,
-    // Sharpening, Texture, or NR so those terms are zero with sliders at 0.
-    let bind_group = pipeline.make_bind_group(&source, &source.view, &source.view, &source.view, &source.view);
+
+    // Run the four Phase 2E blur pairs so Clarity, Texture, Sharpening, NR,
+    // and Dehaze are correctly applied in the exported file. See export_current
+    // for the rationale and timing notes.
+    let blur = BlurPipeline::new(rd);
+    let (_, clarity_a, _, clarity_b) = create_pingpong(rd, image.width, image.height);
+    let (_, sharp_a, _, sharp_b) = create_pingpong(rd, image.width, image.height);
+    let (_, texture_a, _, texture_b) = create_pingpong(rd, image.width, image.height);
+    let (_, nr_a, _, nr_b) = create_pingpong(rd, image.width, image.height);
+
+    let sharp_sigma = item.edit.detail.sharpening.radius.max(0.5);
+    blur.render_pass(&source.view, &clarity_a,  image.width, image.height, true,  16.0);
+    blur.render_pass(&clarity_a,   &clarity_b,  image.width, image.height, false, 16.0);
+    blur.render_pass(&source.view, &sharp_a,    image.width, image.height, true,  sharp_sigma);
+    blur.render_pass(&sharp_a,     &sharp_b,    image.width, image.height, false, sharp_sigma);
+    blur.render_pass(&source.view, &texture_a,  image.width, image.height, true,  5.0);
+    blur.render_pass(&texture_a,   &texture_b,  image.width, image.height, false, 5.0);
+    blur.render_pass(&source.view, &nr_a,       image.width, image.height, true,  2.0);
+    blur.render_pass(&nr_a,        &nr_b,       image.width, image.height, false, 2.0);
+
+    let bind_group = pipeline.make_bind_group(&source, &clarity_b, &sharp_b, &texture_b, &nr_b);
 
     let (target, view) = make_target(rd, out_w, out_h);
     pipeline.render(&view, &bind_group);
