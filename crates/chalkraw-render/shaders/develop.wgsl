@@ -125,6 +125,8 @@ struct EditUniforms {
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
 @group(0) @binding(1) var source_sampler: sampler;
 @group(0) @binding(2) var<uniform> edit: EditUniforms;
+// Phase 2E.1: pre-blurred source texture for Clarity local-contrast boost.
+@group(0) @binding(3) var blur_tex: texture_2d<f32>;
 
 // ── HSV conversion helpers (Sam Hocevar's branchless algorithm) ───────────────
 
@@ -351,6 +353,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         rgb.r = clamp(rgb.r + parametric_zone_lift(rgb.r, pc), 0.0, 1.0);
         rgb.g = clamp(rgb.g + parametric_zone_lift(rgb.g, pc), 0.0, 1.0);
         rgb.b = clamp(rgb.b + parametric_zone_lift(rgb.b, pc), 0.0, 1.0);
+    }
+
+    // 6c. Clarity — local-contrast enhancement using the pre-blurred source.
+    //     blurred is sampled at the *output* UV (after crop/lens), which is the same
+    //     UV used to sample source_tex, ensuring the blur matches the geometry.
+    //     clarity / 100 * 0.5 keeps amount=100 from blowing out.
+    {
+        let blurred = textureSample(blur_tex, source_sampler, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0))).rgb;
+        let local_contrast = rgb - blurred;
+        rgb = rgb + local_contrast * (edit.clarity / 100.0 * 0.5);
     }
 
     // 7. Vibrance — saturation boost weighted against already-saturated colours.

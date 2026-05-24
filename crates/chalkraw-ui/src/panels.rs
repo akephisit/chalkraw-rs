@@ -145,7 +145,14 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
     // ── Presence (multi-pass — Phase 2E) ─────────────────────────────────────
     egui::CollapsingHeader::new("Presence")
         .default_open(false)
-        .show(ui, |ui| { ui.label("(Phase 2E)"); });
+        .show(ui, |ui| {
+            ui.label("Texture (Phase 2E.3)");
+            ui.add_enabled(false, egui::Slider::new(&mut edit.presence.texture, -100.0..=100.0));
+            ui.label("Clarity");
+            if ui.add(egui::Slider::new(&mut edit.presence.clarity, -100.0..=100.0).fixed_decimals(0)).changed() { changed = true; }
+            ui.label("Dehaze (Phase 2E.5)");
+            ui.add_enabled(false, egui::Slider::new(&mut edit.presence.dehaze, -100.0..=100.0));
+        });
 
     // ── Color ─────────────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("Color")

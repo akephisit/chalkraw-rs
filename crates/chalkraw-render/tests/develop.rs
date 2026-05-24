@@ -5,8 +5,8 @@
 /// skip gracefully when no GPU adapter is available (CI / sandbox).
 use chalkraw_core::{Crop, EditState};
 use chalkraw_render::{
-    make_target, read_to_cpu, DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice,
-    SourceTexture,
+    create_pingpong, make_target, read_to_cpu, BlurPipeline, DevelopPipeline, EditUniforms,
+    PipelineConfig, RenderDevice, SourceTexture,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -23,7 +23,8 @@ fn render_solid(rd: &RenderDevice, w: u32, h: u32, pixels: Vec<f32>, edit: &Edit
     let src = SourceTexture::upload(rd, w, h, &pixels);
     let pipe = DevelopPipeline::new(rd, PipelineConfig::default());
     pipe.update_uniforms(&EditUniforms::from(edit));
-    let bg = pipe.make_bind_group(&src);
+    // Tests that don't exercise Clarity pass source.view as the blur view.
+    let bg = pipe.make_bind_group(&src, &src.view);
     let (tex, view) = make_target(rd, w, h);
     pipe.render(&view, &bg);
     read_to_cpu(rd, &tex, w, h).unwrap()
@@ -473,7 +474,7 @@ fn manual_srgb_encoding_matches_hardware_encoding() {
     });
     pipe_hw.update_uniforms(&EditUniforms::from(&edit));
     let src_hw = SourceTexture::upload(&rd, w, h, &pixels);
-    let bg_hw = pipe_hw.make_bind_group(&src_hw);
+    let bg_hw = pipe_hw.make_bind_group(&src_hw, &src_hw.view);
     let (tex_hw, view_hw) = make_target(&rd, w, h);
     pipe_hw.render(&view_hw, &bg_hw);
     let out_hw = read_to_cpu(&rd, &tex_hw, w, h).unwrap();
@@ -487,7 +488,7 @@ fn manual_srgb_encoding_matches_hardware_encoding() {
 
     pipe_sw.update_uniforms(&EditUniforms::from(&edit));
     let src_sw = SourceTexture::upload(&rd, w, h, &pixels);
-    let bg_sw = pipe_sw.make_bind_group(&src_sw);
+    let bg_sw = pipe_sw.make_bind_group(&src_sw, &src_sw.view);
 
     // Create a non-sRGB render target manually (make_target always uses Rgba8UnormSrgb).
     let target_sw = rd.device.create_texture(&wgpu::TextureDescriptor {
@@ -543,4 +544,60 @@ fn vibrance_boosts_low_saturation_colors() {
 
     assert!(vib_spread > base_spread,
         "vibrance +100 should increase R−B spread on low-saturation input; base={base_spread} vib={vib_spread}");
+}
+
+// ── Phase 2E.1: Clarity ───────────────────────────────────────────────────────
+
+/// Clarity +50 on a striped image (alternating bright/dark bands) should
+/// alter edge-adjacent pixels relative to clarity=0, because the blur produces
+/// a value that differs from the source on such high-frequency content.
+#[test]
+fn clarity_plus_50_increases_contrast_on_textured_image() {
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => { eprintln!("skip: no GPU"); return; }
+    };
+    let w: u32 = 32;
+    let h: u32 = 32;
+    // Build a source with alternating bright/dark vertical stripes — high local contrast.
+    let pixels: Vec<f32> = (0..w * h).flat_map(|i: u32| {
+        let x = i % w;
+        let v = if x % 4 < 2 { 0.7_f32 } else { 0.3_f32 };
+        [v, v, v, 1.0_f32]
+    }).collect();
+
+    let source = SourceTexture::upload(&rd, w, h, &pixels);
+    let blur = BlurPipeline::new(&rd);
+    let (_, blur_view_a, _, blur_view_b) = create_pingpong(&rd, w, h);
+    blur.render_pass(&source.view, &blur_view_a, w, h, true, 8.0);
+    blur.render_pass(&blur_view_a, &blur_view_b, w, h, false, 8.0);
+
+    let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
+    let bind = pipe.make_bind_group(&source, &blur_view_b);
+
+    // Render with clarity = 50.
+    let mut edit = EditState::default();
+    edit.presence.clarity = 50.0;
+    pipe.update_uniforms(&EditUniforms::from(&edit));
+    let (tex, view) = make_target(&rd, w, h);
+    pipe.render(&view, &bind);
+    let pixels_out = read_to_cpu(&rd, &tex, w, h).unwrap();
+
+    // Render again with clarity = 0 (using the same bind group — blur view unchanged).
+    let mut edit_zero = EditState::default();
+    edit_zero.presence.clarity = 0.0;
+    pipe.update_uniforms(&EditUniforms::from(&edit_zero));
+    let (tex0, view0) = make_target(&rd, w, h);
+    pipe.render(&view0, &bind);
+    let pixels_zero = read_to_cpu(&rd, &tex0, w, h).unwrap();
+
+    // Pick a stripe-edge pixel (x=8, y=16) — on the boundary between dark and bright.
+    let edge_idx = ((16 * w + 8) * 4) as usize;
+    let with_clarity = pixels_out[edge_idx];
+    let no_clarity = pixels_zero[edge_idx];
+    assert_ne!(
+        with_clarity, no_clarity,
+        "clarity +50 should change edge-pixel brightness vs clarity=0; \
+         with_clarity={with_clarity} no_clarity={no_clarity}"
+    );
 }

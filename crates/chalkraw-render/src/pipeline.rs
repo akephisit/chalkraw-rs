@@ -79,6 +79,17 @@ impl DevelopPipeline {
                     },
                     count: None,
                 },
+                // Phase 2E.1: pre-blurred source for Clarity local-contrast.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -152,7 +163,15 @@ impl DevelopPipeline {
         self.queue.write_buffer(&self.uniform_buffer, 0, bytes_of(&copy));
     }
 
-    pub fn make_bind_group(&self, source: &SourceTexture) -> wgpu::BindGroup {
+    /// Build a bind group for the develop pipeline.
+    /// `blur_view` should be an Rgba16Float view of the pre-blurred source
+    /// (same dimensions as `source`). Pass `&source.view` in callers that do
+    /// not exercise Clarity — with clarity=0 the (source − blur) term is zero.
+    pub fn make_bind_group(
+        &self,
+        source: &SourceTexture,
+        blur_view: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop bg"),
             layout: &self.bind_group_layout,
@@ -160,6 +179,7 @@ impl DevelopPipeline {
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&source.view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(blur_view) },
             ],
         })
     }
