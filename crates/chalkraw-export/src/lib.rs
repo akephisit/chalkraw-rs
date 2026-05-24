@@ -5,8 +5,8 @@ pub mod text;
 use chalkraw_core::EditState;
 use chalkraw_io::LinearImage;
 use chalkraw_render::{
-    make_target, read_to_cpu, BilateralPipeline, BlurPipeline, create_pingpong, DevelopPipeline,
-    EditUniforms, PipelineConfig, RenderDevice, SourceTexture,
+    make_target, make_tone_curve_lut, read_to_cpu, BilateralPipeline, BlurPipeline,
+    create_pingpong, DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice, SourceTexture,
 };
 use std::path::{Path, PathBuf};
 
@@ -144,7 +144,9 @@ pub fn export_current(
     let sigma_range = 0.01 + (nr_amount / 100.0) * 0.2;
     bilat.render_pass(&source.view, &nr_b, 2.0, sigma_range, 3.0);
 
-    let bind_group = pipeline.make_bind_group(&source, &clarity_b, &sharp_b, &texture_b, &nr_b);
+    // Build the tone-curve LUT from the current edit's point curve.
+    let (_lut_tex, lut_view) = make_tone_curve_lut(rd, &edit.tone_curve.rgb.0);
+    let bind_group = pipeline.make_bind_group(&source, &clarity_b, &sharp_b, &texture_b, &nr_b, &lut_view);
 
     let (target, view) = make_target(rd, out_w, out_h);
     pipeline.render(&view, &bind_group);
@@ -243,7 +245,9 @@ fn export_single_item(
     let sigma_range = 0.01 + (nr_amount / 100.0) * 0.2;
     bilat.render_pass(&source.view, &nr_b, 2.0, sigma_range, 3.0);
 
-    let bind_group = pipeline.make_bind_group(&source, &clarity_b, &sharp_b, &texture_b, &nr_b);
+    // Build the tone-curve LUT from the current edit's point curve.
+    let (_lut_tex, lut_view) = make_tone_curve_lut(rd, &item.edit.tone_curve.rgb.0);
+    let bind_group = pipeline.make_bind_group(&source, &clarity_b, &sharp_b, &texture_b, &nr_b, &lut_view);
 
     let (target, view) = make_target(rd, out_w, out_h);
     pipeline.render(&view, &bind_group);

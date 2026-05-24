@@ -818,6 +818,8 @@ impl eframe::App for ChalkrawApp {
             if let Some(gpu) = self.gpu.as_ref() {
                 if edit_changed {
                     gpu.update(&self.state.edit);
+                    // Re-upload the point curve LUT whenever the edit changes.
+                    gpu.upload_tone_curve(&self.state.edit.tone_curve.rgb.0);
                     // Re-run blurs on every edit change. Clarity=σ16, Sharpening=radius slider,
                     // Texture=σ5, NR=bilateral (nr_amount = average of luminance and color sliders).
                     let nr_amount = (self.state.edit.detail.noise_reduction.luminance

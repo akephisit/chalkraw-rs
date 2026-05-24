@@ -1,10 +1,10 @@
-// chalkraw-rs develop shader — Phase 2E polish: bilateral NR, sharp detail/masking, DCP dehaze.
+// chalkraw-rs develop shader — Phase 2D polish: interactive point curve editor.
 // Operations are applied in Lightroom order: WB → Exposure → Contrast →
 // Highlights/Shadows/Whites/Blacks → Saturation → HSL → Color Grading →
-// Parametric Curve → Clarity → Sharpening → Vibrance → Vignette → Grain.
+// Parametric Curve → Point Curve LUT → Clarity → Sharpening → Vibrance → Vignette → Grain.
 //
 // The WGSL struct layout must stay byte-for-byte in sync with EditUniforms in
-// uniforms.rs (total 432 bytes). WGSL alignment rules:
+// uniforms.rs (total 464 bytes). WGSL alignment rules:
 //   vec4<f32> → align 16, size 16
 //   vec3<f32> → align 16, size 12
 //   vec2<f32> → align  8, size  8
@@ -80,7 +80,9 @@
 // 424   _pad_sharp_dm      vec2<f32>
 // v0.19.1 (Atmospheric Light for Dehaze): vec4<f32> = 16 bytes.
 // 432   atmospheric_light  vec4<f32>   .rgb = [r, g, b], .w = 0.0
-// Total: 448 bytes.
+// Phase 2D polish (Point Curve LUT): vec4<u32> = 16 bytes.
+// 448   tone_curve_pad     vec4<u32>   .x = tone_curve_active (1 = LUT active), .yzw = padding
+// Total: 464 bytes.
 
 struct EditUniforms {
     exposure:           f32,
@@ -155,6 +157,9 @@ struct EditUniforms {
     // v0.19.1: Per-image atmospheric light for Dehaze (offset 432..448).
     // .rgb = estimated atmospheric light, .w = 0.0 (padding).
     atmospheric_light:  vec4<f32>,
+    // Phase 2D polish: Point Curve LUT active flag (offset 448..464).
+    // Packed as vec4<u32> to match Rust layout: .x = tone_curve_active, .yzw = padding.
+    tone_curve_pad:     vec4<u32>,
 };
 
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
@@ -168,6 +173,8 @@ struct EditUniforms {
 @group(0) @binding(5) var texture_blur_tex: texture_2d<f32>;
 // Phase 2E.4: small-sigma pre-blurred source for Noise Reduction (sigma=2px).
 @group(0) @binding(6) var nr_blur_tex: texture_2d<f32>;
+// Phase 2D polish: 256-entry R16Float 1D LUT for the point curve (per-channel).
+@group(0) @binding(7) var tone_curve_lut: texture_1d<f32>;
 
 // ── Luma helper (BT.601 coefficients) ────────────────────────────────────────
 // Used by the Phase 2E.4 Noise Reduction pass to split luminance from chroma.
@@ -203,6 +210,14 @@ fn parametric_zone_lift(v: f32, p: vec4<f32>) -> f32 {
     let dk = smoothstep(0.0, 0.33, v) * (1.0 - smoothstep(0.33, 0.66, v));
     let lt = smoothstep(0.33, 0.66, v) * (1.0 - smoothstep(0.66, 1.0, v));
     return (sh * p.x + dk * p.y + lt * p.z + hi * p.w) / 100.0 * 0.25;
+}
+
+// ── Point Curve LUT helper ────────────────────────────────────────────────────
+
+// Sample the 256-entry 1D LUT. `v` is a linear value in [0, 1]; the LUT maps
+// input → output using piecewise-linear interpolation of the user's control points.
+fn apply_tone_curve_lut(v: f32) -> f32 {
+    return textureSample(tone_curve_lut, source_sampler, clamp(v, 0.0, 1.0)).r;
 }
 
 // ── Color Grading helper ──────────────────────────────────────────────────────
@@ -440,6 +455,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         rgb.r = clamp(rgb.r + parametric_zone_lift(rgb.r, pc), 0.0, 1.0);
         rgb.g = clamp(rgb.g + parametric_zone_lift(rgb.g, pc), 0.0, 1.0);
         rgb.b = clamp(rgb.b + parametric_zone_lift(rgb.b, pc), 0.0, 1.0);
+    }
+
+    // 6b2. Point Curve LUT — per-channel lookup using the 256-entry 1D R16Float texture.
+    //      Only applied when tone_curve_active == 1; identity LUT is a no-op anyway
+    //      but the texture sample is not free, so gate it behind the flag.
+    if (edit.tone_curve_pad.x == 1u) {
+        rgb.r = apply_tone_curve_lut(rgb.r);
+        rgb.g = apply_tone_curve_lut(rgb.g);
+        rgb.b = apply_tone_curve_lut(rgb.b);
     }
 
     // 6c. Clarity — local-contrast enhancement using the large-sigma pre-blurred source.

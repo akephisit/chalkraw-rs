@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use chalkraw_core::EditState;
+use chalkraw_core::{curve_is_identity, EditState};
 
 /// std140-ish uniform layout for the develop shader. Padded so every field
 /// aligns on 16 bytes in WGSL. The byte layout must mirror the WGSL struct
@@ -77,7 +77,10 @@ use chalkraw_core::EditState;
 /// 424  _pad_sharp_dm       [f32;2]
 /// v0.19.1 (Atmospheric Light for Dehaze): 4 × f32 = 16 bytes.
 /// 432  atmospheric_light   [f32;4]  [r, g, b, 0.0]
-/// Total: 448 bytes
+/// Phase 2D polish (Point Curve LUT): 1 × u32 + 3-u32 pad = 16 bytes.
+/// 448  tone_curve_active   u32   (1 = LUT active, 0 = identity — skip texture sample)
+/// 452  _pad_tca            [u32;3]
+/// Total: 464 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct EditUniforms {
@@ -155,6 +158,9 @@ pub struct EditUniforms {
     pub _pad_sharp_dm: [f32; 2],    // offset 424  → pads to 432
     // v0.19.1: Atmospheric light for Dehaze (4 × f32 = 16 bytes).
     pub atmospheric_light: [f32; 4], // offset 432  [r, g, b, 0.0]
+    // Phase 2D polish: Point Curve LUT active flag (u32 + 3-u32 pad = 16 bytes).
+    pub tone_curve_active: u32,      // offset 448  (1 = LUT active, 0 = skip)
+    pub _pad_tca: [u32; 3],          // offset 452  → pads to 464
 }
 
 impl From<&EditState> for EditUniforms {
@@ -240,6 +246,9 @@ impl From<&EditState> for EditUniforms {
             // v0.19.1: Atmospheric light default (white); overridden by
             // DevelopPipeline::set_atmospheric_light at source upload time.
             atmospheric_light: [0.95, 0.95, 0.95, 0.0],
+            // Phase 2D polish: Point Curve LUT active flag.
+            tone_curve_active: if curve_is_identity(&e.tone_curve.rgb) { 0 } else { 1 },
+            _pad_tca: [0; 3],
         }
     }
 }
@@ -250,7 +259,7 @@ mod tests {
 
     #[test]
     fn edit_uniforms_size_matches_wgsl() {
-        // Must be 448 bytes to match the WGSL EditUniforms struct layout.
+        // Must be 464 bytes to match the WGSL EditUniforms struct layout.
         // Phase 2A: 128 bytes. Phase 2B adds 6 × vec4<f32> = 96 bytes → 224.
         // Phase 2C adds 4 × vec4<f32> = 64 bytes → 288.
         // Phase 2D adds 1 × vec4<f32> = 16 bytes → 304.
@@ -261,10 +270,11 @@ mod tests {
         // Phase 2E.5 adds dehaze + 3-f32 pad = 16 bytes → 416.
         // Phase 2E polish adds sharpening_detail + sharpening_masking + 2-f32 pad = 16 bytes → 432.
         // v0.19.1 adds atmospheric_light vec4<f32> = 16 bytes → 448.
+        // Phase 2D polish adds tone_curve_active (u32) + 3-u32 pad = 16 bytes → 464.
         // If this fails, check that the Rust and WGSL fields are in sync.
         assert_eq!(
             std::mem::size_of::<EditUniforms>(),
-            448,
+            464,
             "EditUniforms size mismatch — Rust and WGSL structs are out of sync"
         );
     }

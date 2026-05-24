@@ -5,8 +5,8 @@
 /// skip gracefully when no GPU adapter is available (CI / sandbox).
 use chalkraw_core::{Crop, EditState};
 use chalkraw_render::{
-    create_pingpong, make_target, read_to_cpu, BilateralPipeline, BlurPipeline, DevelopPipeline,
-    EditUniforms, PipelineConfig, RenderDevice, SourceTexture,
+    create_pingpong, make_identity_lut, make_target, read_to_cpu, BilateralPipeline, BlurPipeline,
+    DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice, SourceTexture,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -23,8 +23,10 @@ fn render_solid(rd: &RenderDevice, w: u32, h: u32, pixels: Vec<f32>, edit: &Edit
     let src = SourceTexture::upload(rd, w, h, &pixels);
     let pipe = DevelopPipeline::new(rd, PipelineConfig::default());
     pipe.update_uniforms(&EditUniforms::from(edit));
-    // Tests that don't exercise Clarity/Sharpening/Texture/NR pass source.view for all blur views.
-    let bg = pipe.make_bind_group(&src, &src.view, &src.view, &src.view, &src.view);
+    // Tests that don't exercise Clarity/Sharpening/Texture/NR pass source.view for blur views.
+    // Pass identity LUT for tone curve (no effect when tone_curve_active=0).
+    let (_lut_tex, lut_view) = make_identity_lut(rd);
+    let bg = pipe.make_bind_group(&src, &src.view, &src.view, &src.view, &src.view, &lut_view);
     let (tex, view) = make_target(rd, w, h);
     pipe.render(&view, &bg);
     read_to_cpu(rd, &tex, w, h).unwrap()
@@ -475,7 +477,9 @@ fn manual_srgb_encoding_matches_hardware_encoding() {
     pipe_hw.update_uniforms(&EditUniforms::from(&edit));
     let src_hw = SourceTexture::upload(&rd, w, h, &pixels);
     // Pass source.view for all blur views (Clarity/Sharpening/Texture/NR not exercised).
-    let bg_hw = pipe_hw.make_bind_group(&src_hw, &src_hw.view, &src_hw.view, &src_hw.view, &src_hw.view);
+    // Pass identity LUT for tone curve (no effect).
+    let (_lut_hw, lut_view_hw) = make_identity_lut(&rd);
+    let bg_hw = pipe_hw.make_bind_group(&src_hw, &src_hw.view, &src_hw.view, &src_hw.view, &src_hw.view, &lut_view_hw);
     let (tex_hw, view_hw) = make_target(&rd, w, h);
     pipe_hw.render(&view_hw, &bg_hw);
     let out_hw = read_to_cpu(&rd, &tex_hw, w, h).unwrap();
@@ -489,7 +493,8 @@ fn manual_srgb_encoding_matches_hardware_encoding() {
 
     pipe_sw.update_uniforms(&EditUniforms::from(&edit));
     let src_sw = SourceTexture::upload(&rd, w, h, &pixels);
-    let bg_sw = pipe_sw.make_bind_group(&src_sw, &src_sw.view, &src_sw.view, &src_sw.view, &src_sw.view);
+    let (_lut_sw, lut_view_sw) = make_identity_lut(&rd);
+    let bg_sw = pipe_sw.make_bind_group(&src_sw, &src_sw.view, &src_sw.view, &src_sw.view, &src_sw.view, &lut_view_sw);
 
     // Create a non-sRGB render target manually (make_target always uses Rgba8UnormSrgb).
     let target_sw = rd.device.create_texture(&wgpu::TextureDescriptor {
@@ -580,7 +585,9 @@ fn sharpening_amount_100_changes_high_freq_edges() {
 
     let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
     // Pass source.view for texture_blur and nr_blur (not exercised in this sharpening test).
-    let bind = pipe.make_bind_group(&source, &clar_b, &sharp_b, &source.view, &source.view);
+    // Pass identity LUT for tone curve (no effect).
+    let (_lut_tex, lut_view) = make_identity_lut(&rd);
+    let bind = pipe.make_bind_group(&source, &clar_b, &sharp_b, &source.view, &source.view, &lut_view);
 
     // Render with sharpening amount = 100.
     let mut edit = EditState::default();
@@ -638,7 +645,9 @@ fn clarity_plus_50_increases_contrast_on_textured_image() {
 
     let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
     // Pass source.view for sharpening, texture, and NR blurs (not exercised in this test).
-    let bind = pipe.make_bind_group(&source, &blur_view_b, &source.view, &source.view, &source.view);
+    // Pass identity LUT for tone curve (no effect).
+    let (_lut_tex, lut_view) = make_identity_lut(&rd);
+    let bind = pipe.make_bind_group(&source, &blur_view_b, &source.view, &source.view, &source.view, &lut_view);
 
     // Render with clarity = 50.
     let mut edit = EditState::default();
@@ -702,7 +711,9 @@ fn texture_amount_50_changes_mid_freq_pattern() {
 
     let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
     // Pass source.view for NR blur (not exercised in this texture test).
-    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b, &source.view);
+    // Pass identity LUT for tone curve (no effect).
+    let (_lut_tex, lut_view) = make_identity_lut(&rd);
+    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b, &source.view, &lut_view);
 
     let mut edit = EditState::default();
     edit.presence.texture = 50.0;
@@ -767,7 +778,9 @@ fn nr_luminance_100_smooths_noisy_source() {
     blur.render_pass(&n_a, &n_b, w, h, false, 2.0);
 
     let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
-    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b, &n_b);
+    // Pass identity LUT for tone curve (no effect).
+    let (_lut_tex, lut_view) = make_identity_lut(&rd);
+    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b, &n_b, &lut_view);
 
     // Render with NR luminance = 0 (off).
     let edit_off = EditState::default();
@@ -841,7 +854,9 @@ fn dehaze_positive_increases_contrast_on_hazy_pattern() {
     blur.render_pass(&source.view, &n_a, w, h, true,  2.0);
     blur.render_pass(&n_a, &n_b, w, h, false, 2.0);
     let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
-    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b, &n_b);
+    // Pass identity LUT for tone curve (no effect).
+    let (_lut_tex, lut_view) = make_identity_lut(&rd);
+    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b, &n_b, &lut_view);
 
     let edit_off = EditState::default();
     pipe.update_uniforms(&EditUniforms::from(&edit_off));
@@ -909,7 +924,9 @@ fn bilateral_pipeline_smoke_test() {
 
     // Build the develop pipeline and verify it can render using the bilateral output.
     let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
-    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b, &nr_b);
+    // Pass identity LUT for tone curve (no effect).
+    let (_lut_tex, lut_view) = make_identity_lut(&rd);
+    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b, &nr_b, &lut_view);
 
     let mut edit = EditState::default();
     edit.detail.noise_reduction.luminance = 80.0;

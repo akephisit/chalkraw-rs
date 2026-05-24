@@ -1,8 +1,8 @@
-use chalkraw_core::EditState;
+use chalkraw_core::{interpolate_curve, CurvePoint, EditState};
 use chalkraw_io::LinearImage;
 use chalkraw_render::{
-    create_pingpong, BilateralPipeline, BlurPipeline, DevelopPipeline, EditUniforms,
-    PipelineConfig, RenderDevice, SourceTexture,
+    create_pingpong, f32_to_f16_bits, BilateralPipeline, BlurPipeline, DevelopPipeline,
+    EditUniforms, PipelineConfig, RenderDevice, SourceTexture,
 };
 use egui::PaintCallbackInfo;
 use egui_wgpu::CallbackTrait;
@@ -52,7 +52,14 @@ pub struct CanvasGpu {
     #[allow(dead_code)]
     pub nr_tex_b: ewgpu::Texture,
     pub nr_view_b: ewgpu::TextureView,
+    /// Point curve 1D LUT — 256 × R16Float entries. Identity ramp by default.
+    #[allow(dead_code)]
+    pub tone_curve_lut_tex: ewgpu::Texture,
+    #[allow(dead_code)]
+    pub tone_curve_lut_view: ewgpu::TextureView,
     pub bind_group: ewgpu::BindGroup,
+    /// wgpu queue needed for LUT uploads after initial creation.
+    queue: Arc<ewgpu::Queue>,
 }
 
 impl CanvasGpu {
@@ -72,8 +79,43 @@ impl CanvasGpu {
         // NR uses a single ping-pong texture; the bilateral filter writes to nr_view_b directly.
         let (nr_tex_a, nr_view_a, nr_tex_b, nr_view_b) =
             create_pingpong(rd, img.width, img.height);
+
+        // Point curve LUT — 256-entry R16Float 1D texture, initialised to identity ramp.
+        let tone_curve_lut_tex = rd.device.create_texture(&ewgpu::TextureDescriptor {
+            label: Some("tone curve lut"),
+            size: ewgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: ewgpu::TextureDimension::D1,
+            format: ewgpu::TextureFormat::R16Float,
+            usage: ewgpu::TextureUsages::TEXTURE_BINDING | ewgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let tone_curve_lut_view = tone_curve_lut_tex.create_view(&ewgpu::TextureViewDescriptor::default());
+        // Upload identity ramp: entry i = i / 255 as f16.
+        let identity_lut: Vec<u16> = (0u16..256).map(|i| f32_to_f16_bits(i as f32 / 255.0)).collect();
+        rd.queue.write_texture(
+            ewgpu::TexelCopyTextureInfo {
+                texture: &tone_curve_lut_tex,
+                mip_level: 0,
+                origin: ewgpu::Origin3d::ZERO,
+                aspect: ewgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&identity_lut),
+            ewgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256 * 2), // 1 channel × 2 bytes (f16)
+                rows_per_image: Some(1),
+            },
+            ewgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+        );
+
         // Build the develop bind group pointing at the final blur result textures.
-        let bind_group = pipeline.make_bind_group(&source, &clarity_view_b, &sharp_view_b, &texture_view_b, &nr_view_b);
+        let bind_group = pipeline.make_bind_group(
+            &source, &clarity_view_b, &sharp_view_b, &texture_view_b, &nr_view_b,
+            &tone_curve_lut_view,
+        );
+        let queue = rd.queue.clone();
         let me = Self {
             source,
             pipeline,
@@ -95,7 +137,10 @@ impl CanvasGpu {
             nr_view_a,
             nr_tex_b,
             nr_view_b,
+            tone_curve_lut_tex,
+            tone_curve_lut_view,
             bind_group,
+            queue,
         };
         // Run initial blurs at image-load time.
         // Clarity sigma=16 px (large); Sharpening default radius=1.0 px (small);
@@ -180,6 +225,34 @@ impl CanvasGpu {
 
     pub fn update(&self, edit: &EditState) {
         self.pipeline.update_uniforms(&EditUniforms::from(edit));
+    }
+
+    /// Re-upload the tone curve LUT from the given control points.
+    /// This generates a 256-entry piecewise-linear interpolation and writes it
+    /// to the R16Float 1D texture on the GPU.
+    pub fn upload_tone_curve(&self, points: &[CurvePoint]) {
+        let lut_f16: Vec<u16> = (0u32..256)
+            .map(|i| {
+                let x = i as f32 / 255.0;
+                let y = interpolate_curve(points, x);
+                f32_to_f16_bits(y.clamp(0.0, 1.0))
+            })
+            .collect();
+        self.queue.write_texture(
+            ewgpu::TexelCopyTextureInfo {
+                texture: &self.tone_curve_lut_tex,
+                mip_level: 0,
+                origin: ewgpu::Origin3d::ZERO,
+                aspect: ewgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&lut_f16),
+            ewgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256 * 2),
+                rows_per_image: Some(1),
+            },
+            ewgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+        );
     }
 }
 

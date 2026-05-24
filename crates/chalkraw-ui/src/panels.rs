@@ -1,4 +1,4 @@
-use chalkraw_core::EditState;
+use chalkraw_core::{interpolate_curve, EditState};
 use egui::Ui;
 
 // ── Scroll-aware slider helpers ───────────────────────────────────────────────
@@ -55,6 +55,183 @@ fn slider_scroll_suffix(
             }
         }
     }
+    changed
+}
+
+// ── Point Curve Widget ────────────────────────────────────────────────────────
+
+/// Interactive 200×200 point curve editor.
+///
+/// Plots the current `curve` (piecewise-linear interpolation between control
+/// points) on a dark background with a grid overlay.  Supports:
+/// - Drag a control point to move it.
+/// - Click on empty space to add a control point.
+/// - Right-click a middle control point to delete it.
+///
+/// The first and last points are pinned to x=0 and x=1; only their y is
+/// draggable.  Middle points cannot cross their neighbours.
+///
+/// Returns `true` when the curve was modified.
+pub fn point_curve_widget(ui: &mut egui::Ui, curve: &mut chalkraw_core::Curve) -> bool {
+    let mut changed = false;
+    let desired_size = egui::vec2(200.0, 200.0);
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
+
+    // Background and grid.
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, egui::Color32::from_gray(30));
+    let grid_color = egui::Color32::from_gray(70);
+    for i in 1..4 {
+        let t = i as f32 / 4.0;
+        let x = rect.left() + rect.width() * t;
+        let y = rect.top() + rect.height() * t;
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(0.5, grid_color),
+        );
+        painter.line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            egui::Stroke::new(0.5, grid_color),
+        );
+    }
+    // Diagonal reference (identity line).
+    painter.line_segment(
+        [rect.left_bottom(), rect.right_top()],
+        egui::Stroke::new(0.5, egui::Color32::from_gray(50)),
+    );
+
+    // Helpers: map curve (x, y) ∈ [0, 1] ↔ screen coordinates.
+    let to_screen = |p: chalkraw_core::CurvePoint| -> egui::Pos2 {
+        egui::pos2(
+            rect.left() + p.x * rect.width(),
+            rect.bottom() - p.y * rect.height(),
+        )
+    };
+    let to_curve = |pos: egui::Pos2| -> chalkraw_core::CurvePoint {
+        chalkraw_core::CurvePoint {
+            x: ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
+            y: ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0),
+        }
+    };
+
+    // Draw the interpolated curve (64 segments).
+    let mut prev_screen = to_screen(chalkraw_core::CurvePoint {
+        x: 0.0,
+        y: interpolate_curve(&curve.0, 0.0),
+    });
+    for i in 1..=64 {
+        let x = i as f32 / 64.0;
+        let y = interpolate_curve(&curve.0, x);
+        let cur = to_screen(chalkraw_core::CurvePoint { x, y });
+        painter.line_segment(
+            [prev_screen, cur],
+            egui::Stroke::new(1.5, egui::Color32::from_rgb(220, 220, 100)),
+        );
+        prev_screen = cur;
+    }
+
+    // Draw control-point circles and handle drag.
+    let hover_radius = 8.0;
+    // For drag: find the point closest to where the drag started.  We remember
+    // the active index across frames using the egui memory (keyed by widget id).
+    let widget_id = response.id;
+    let mut dragged_idx: Option<usize> =
+        ui.memory(|m| m.data.get_temp::<usize>(widget_id));
+
+    // On drag release, clear the stored index.
+    if response.drag_stopped() {
+        ui.memory_mut(|m| m.data.remove::<usize>(widget_id));
+        dragged_idx = None;
+    }
+
+    for p in curve.0.iter() {
+        let screen_p = to_screen(*p);
+        painter.circle_filled(screen_p, 5.0, egui::Color32::from_rgb(255, 200, 60));
+        painter.circle_stroke(
+            screen_p,
+            5.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 150, 30)),
+        );
+    }
+
+    if response.drag_started() {
+        // On the first frame of a drag, pick the closest point.
+        if let Some(drag_pos) = response.interact_pointer_pos() {
+            let mut best: Option<(usize, f32)> = None;
+            for (idx, p) in curve.0.iter().enumerate() {
+                let d = (to_screen(*p) - drag_pos).length();
+                if d < hover_radius * 2.0
+                    && best.map(|(_, bd)| d < bd).unwrap_or(true)
+                {
+                    best = Some((idx, d));
+                }
+            }
+            if let Some((idx, _)) = best {
+                ui.memory_mut(|m| m.data.insert_temp(widget_id, idx));
+                dragged_idx = Some(idx);
+            }
+        }
+    }
+
+    if response.dragged() {
+        if let Some(idx) = dragged_idx {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let mut new_p = to_curve(pos);
+                // Pin x of first and last points.
+                if idx == 0 {
+                    new_p.x = 0.0;
+                } else if idx == curve.0.len() - 1 {
+                    new_p.x = 1.0;
+                } else {
+                    // Middle points: prevent crossing neighbours.
+                    new_p.x = new_p.x.clamp(
+                        curve.0[idx - 1].x + 0.01,
+                        curve.0[idx + 1].x - 0.01,
+                    );
+                }
+                curve.0[idx] = new_p;
+                changed = true;
+            }
+        }
+    }
+
+    // Click on empty space → add a control point.
+    if response.clicked() {
+        if let Some(click_pos) = response.interact_pointer_pos() {
+            let cp = to_curve(click_pos);
+            // Only add if not too close to an existing point.
+            let too_close = curve.0.iter().any(|p| (p.x - cp.x).abs() < 0.02);
+            if !too_close {
+                curve.0.push(cp);
+                curve.0.sort_by(|a, b| {
+                    a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                changed = true;
+            }
+        }
+    }
+
+    // Right-click a middle point → delete it (keep at least 2 points).
+    if response.secondary_clicked() {
+        if let Some(click_pos) = response.interact_pointer_pos() {
+            let mut to_remove: Option<usize> = None;
+            for (idx, p) in curve.0.iter().enumerate() {
+                // Never delete the first or last point.
+                if idx == 0 || idx == curve.0.len() - 1 {
+                    continue;
+                }
+                if (to_screen(*p) - click_pos).length() < hover_radius {
+                    to_remove = Some(idx);
+                    break;
+                }
+            }
+            if let Some(idx) = to_remove {
+                curve.0.remove(idx);
+                changed = true;
+            }
+        }
+    }
+
     changed
 }
 
@@ -256,8 +433,18 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
                     ui.label("Shadows");
                     if slider_scroll(ui, &mut edit.parametric_curve.shadows, -100.0..=100.0, 0) { changed = true; }
                 });
-            ui.add_space(4.0);
-            ui.label("Point curve editor — coming in a later polish phase");
+            egui::CollapsingHeader::new("Point Curve")
+                .id_salt("tc_point")
+                .default_open(false)
+                .show(ui, |ui| {
+                    if point_curve_widget(ui, &mut edit.tone_curve.rgb) {
+                        changed = true;
+                    }
+                    if ui.button("Reset to Linear").clicked() {
+                        edit.tone_curve.rgb = chalkraw_core::Curve::default();
+                        changed = true;
+                    }
+                });
         });
 
     // ── HSL (Phase 2B) ────────────────────────────────────────────────────────

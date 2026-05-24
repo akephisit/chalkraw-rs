@@ -85,7 +85,7 @@ pub fn estimate_atmospheric_light(pixels: &[f32], width: u32, height: u32) -> [f
 }
 
 /// IEEE-754 binary32 → binary16 (round-to-nearest-even).
-fn f32_to_f16_bits(v: f32) -> u16 {
+pub fn f32_to_f16_bits(v: f32) -> u16 {
     let bits = v.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
     let exp = ((bits >> 23) & 0xff) as i32;

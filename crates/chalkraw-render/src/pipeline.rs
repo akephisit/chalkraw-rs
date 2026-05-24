@@ -126,6 +126,17 @@ impl DevelopPipeline {
                     },
                     count: None,
                 },
+                // Phase 2D polish: 256-entry R16Float 1D LUT for the point curve.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D1,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -222,6 +233,8 @@ impl DevelopPipeline {
     /// `texture_blur_view` should be an Rgba16Float view of the mid-sigma
     /// pre-blurred source (sigma ≈ 5 px) for Texture local-contrast.
     /// `nr_blur_view` should be an Rgba16Float view of the NR blur (sigma=2px).
+    /// `tone_curve_lut_view` should be an R16Float 1D texture view (256 entries)
+    /// for the point-curve LUT.
     /// Pass `&source.view` for any arg in callers that do not exercise those
     /// effects — with the relevant slider at 0 the term is zero.
     pub fn make_bind_group(
@@ -231,6 +244,7 @@ impl DevelopPipeline {
         sharp_blur_view: &wgpu::TextureView,
         texture_blur_view: &wgpu::TextureView,
         nr_blur_view: &wgpu::TextureView,
+        tone_curve_lut_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop bg"),
@@ -243,6 +257,7 @@ impl DevelopPipeline {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(sharp_blur_view) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(texture_blur_view) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(nr_blur_view) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(tone_curve_lut_view) },
             ],
         })
     }

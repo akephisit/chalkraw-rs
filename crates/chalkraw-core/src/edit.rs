@@ -308,6 +308,39 @@ impl EditState {
     }
 }
 
+/// Piecewise-linear interpolation of a sorted `Curve` at input `x` (0..1).
+/// If the curve has no points, returns `x` (identity).
+/// Values outside the range of the first/last control point are clamped to
+/// the first/last y value.
+pub fn interpolate_curve(points: &[CurvePoint], x: f32) -> f32 {
+    if points.is_empty() { return x; }
+    if x <= points[0].x { return points[0].y; }
+    let last = points[points.len() - 1];
+    if x >= last.x { return last.y; }
+    for i in 0..points.len() - 1 {
+        let p1 = points[i];
+        let p2 = points[i + 1];
+        if x >= p1.x && x <= p2.x {
+            let t = if p2.x - p1.x > f32::EPSILON {
+                (x - p1.x) / (p2.x - p1.x)
+            } else {
+                0.0
+            };
+            return p1.y + (p2.y - p1.y) * t;
+        }
+    }
+    x // fallback
+}
+
+/// True when `curve` is the identity linear ramp `[(0,0), (1,1)]`.
+pub fn curve_is_identity(curve: &Curve) -> bool {
+    curve.0.len() == 2
+        && (curve.0[0].x - 0.0).abs() < 1e-6
+        && (curve.0[0].y - 0.0).abs() < 1e-6
+        && (curve.0[1].x - 1.0).abs() < 1e-6
+        && (curve.0[1].y - 1.0).abs() < 1e-6
+}
+
 pub type PresetId = uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -371,6 +404,27 @@ mod tests {
         let bytes = bincode::serialize(&s).unwrap();
         let back: EditState = bincode::deserialize(&bytes).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn interpolate_curve_linear_default_is_identity() {
+        let curve = Curve::default();
+        assert_eq!(interpolate_curve(&curve.0, 0.0), 0.0);
+        assert_eq!(interpolate_curve(&curve.0, 0.5), 0.5);
+        assert_eq!(interpolate_curve(&curve.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn interpolate_curve_three_points_lerps() {
+        let curve = Curve(vec![
+            CurvePoint { x: 0.0, y: 0.0 },
+            CurvePoint { x: 0.5, y: 0.8 },
+            CurvePoint { x: 1.0, y: 1.0 },
+        ]);
+        let v25 = interpolate_curve(&curve.0, 0.25);
+        assert!((v25 - 0.4).abs() < 1e-5, "expected 0.4 got {v25}");
+        let v50 = interpolate_curve(&curve.0, 0.5);
+        assert!((v50 - 0.8).abs() < 1e-5, "expected 0.8 got {v50}");
     }
 
     #[test]
