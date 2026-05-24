@@ -369,6 +369,7 @@ impl ChalkrawApp {
             Arc::new(render_state.queue.clone()),
         );
         let format = render_state.target_format;
+        log::info!("wgpu surface target_format = {format:?}");
         let gpu = CanvasGpu::new(&rd, &self.state.image, format);
         gpu.update(&self.state.edit);
         self.gpu = Some(Arc::new(gpu));
@@ -494,9 +495,20 @@ impl eframe::App for ChalkrawApp {
         });
 
         egui::SidePanel::right("right").default_width(280.0).show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                edit_changed |= right_panel(ui, &mut self.state.edit);
-            });
+            // Disable mouse-wheel scrolling on the ScrollArea so that scroll
+            // events are delivered to hovered Sliders instead of consumed by
+            // the panel.  The scroll bar and drag-to-scroll remain active so
+            // the panel is still scrollable when its content overflows.
+            let scroll_source = egui::scroll_area::ScrollSource {
+                scroll_bar: true,
+                drag: true,
+                mouse_wheel: false,
+            };
+            egui::ScrollArea::vertical()
+                .scroll_source(scroll_source)
+                .show(ui, |ui| {
+                    edit_changed |= right_panel(ui, &mut self.state.edit);
+                });
         });
 
         egui::TopBottomPanel::bottom("filmstrip").default_height(120.0).show(ctx, |ui| {
