@@ -250,6 +250,35 @@ fn linear_to_srgb(c: f32) -> f32 {
     }
 }
 
+// ── Multi-octave value noise (fbm) for Grain ─────────────────────────────────
+// vnoise: bilinear-interpolated value noise with smoothstep weighting.
+// fbm: 4-octave fractional Brownian motion built on top of vnoise.
+// Together these produce a more natural film-grain character than a single-
+// octave hash: finer octaves add texture detail, and the roughness parameter
+// can modulate the perceived "chunkiness" via a gamma curve on the magnitude.
+fn vnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);  // smoothstep
+    let a = fract(sin(dot(i,                         vec2<f32>(127.1, 311.7))) * 43758.5453);
+    let b = fract(sin(dot(i + vec2<f32>(1.0, 0.0),  vec2<f32>(127.1, 311.7))) * 43758.5453);
+    let c = fract(sin(dot(i + vec2<f32>(0.0, 1.0),  vec2<f32>(127.1, 311.7))) * 43758.5453);
+    let d = fract(sin(dot(i + vec2<f32>(1.0, 1.0),  vec2<f32>(127.1, 311.7))) * 43758.5453);
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn fbm(p: vec2<f32>) -> f32 {
+    var value: f32 = 0.0;
+    var amplitude: f32 = 0.5;
+    var freq: vec2<f32> = p;
+    for (var i = 0; i < 4; i = i + 1) {
+        value = value + amplitude * vnoise(freq);
+        freq = freq * 2.0;
+        amplitude = amplitude * 0.5;
+    }
+    return value;
+}
+
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -340,23 +369,26 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let above = max(exposed - vec3<f32>(0.9), vec3<f32>(0.0));
     rgb = exposed - above * (1.0 - 1.0 / (1.0 + above * 2.0));
 
-    // 3. Contrast — tanh S-curve blended with identity around midgrey (0.5).
-    //    At contrast=0 the result is exactly the identity (mix factor = 0).
-    //    At positive contrast, the tanh S-curve compresses extremes toward 0/1 smoothly.
-    //    Normalised so that rgb=0 and rgb=1 are preserved at the curve ends.
-    let contrast_k = edit.contrast / 100.0;
-    let centred = rgb - vec3<f32>(0.5);
-    let slope_c = 1.0 + abs(contrast_k) * 2.0;
-    // Normalise by tanh(0.5 * slope_c) so centred=±0.5 maps to ±0.5 (black/white preserved).
-    let norm_c = tanh(0.5 * slope_c);
-    let s_shaped = vec3<f32>(
-        tanh(centred.r * slope_c) / norm_c,
-        tanh(centred.g * slope_c) / norm_c,
-        tanh(centred.b * slope_c) / norm_c,
-    ) * 0.5;
-    // Blend: contrast_k=0 → pure identity; contrast_k=±1 → full S-curve.
-    let shaped = mix(centred, s_shaped, abs(contrast_k));
-    rgb = vec3<f32>(0.5) + shaped;
+    // 3. Contrast — more aggressive S-curve with shadow/highlight roll-off (closer to Lightroom feel).
+    //    At contrast=0 the mix factor is 0, so the result is exactly the identity.
+    //    Slope grows non-linearly so contrast=±100 feels stronger than a plain tanh(2x).
+    //    Output is normalised by the curve's actual range so ±100 reaches full black/white.
+    let contrast_k = edit.contrast / 100.0;  // -1..1
+    let abs_k = abs(contrast_k);
+    if (abs_k > 0.001) {
+        let centred = rgb - vec3<f32>(0.5);
+        // Non-linear slope growth: more dramatic effect at high slider values.
+        let slope = 1.0 + contrast_k * 2.0 + sign(contrast_k) * abs_k * abs_k * 1.5;
+        // tanh-based S-curve with shoulder roll-off to avoid clipping.
+        let shaped_r = tanh(centred.r * slope) * 0.5;
+        let shaped_g = tanh(centred.g * slope) * 0.5;
+        let shaped_b = tanh(centred.b * slope) * 0.5;
+        // Normalise by the curve's actual range (tanh(slope/2)*0.5 max) so ±100 reaches 0/1.
+        let norm = tanh(slope * 0.5) * 0.5;
+        let normalised = vec3<f32>(shaped_r, shaped_g, shaped_b) / max(norm, 0.0001) * 0.5;
+        // Blend by abs(contrast_k): contrast=0 is exact identity, contrast=±100 is full curve.
+        rgb = mix(rgb, normalised + vec3<f32>(0.5), abs_k);
+    }
 
     // 4. Highlights / Shadows / Whites / Blacks — luminance-weighted gains.
     let lum = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -592,13 +624,19 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let vig_factor = 1.0 + vig_mask * edit.vignette_amount / 100.0;
     rgb *= vig_factor;
 
-    // 9. Grain — single-octave hash noise.
-    //    grain_roughness is passed through to the uniform buffer but has no
-    //    shader effect in Phase 2A; reserved for multi-octave noise in Phase 2E.
-    let scale = mix(50.0, 500.0, 1.0 - edit.grain_size / 100.0);
-    let h = fract(sin(dot(in.uv * scale, vec2<f32>(127.1, 311.7))) * 43758.5453);
-    let noise = (h - 0.5) * edit.grain_amount / 100.0 * 0.3;
-    rgb += vec3<f32>(noise);
+    // 9. Grain — multi-octave value noise (fbm).
+    //    grain_roughness is now meaningful: higher values produce chunkier grain by
+    //    applying a gamma curve to the noise magnitude (power < 1 expands large values,
+    //    making the grain feel more "punchy"). At roughness=0 the behaviour is linear.
+    //    grain_amount=0 → noise contribution is exactly 0 (identity preserved).
+    let grain_size_inv = mix(50.0, 500.0, 1.0 - edit.grain_size / 100.0);
+    let grain_roughness = edit.grain_roughness / 100.0;
+    let n = fbm(in.uv * grain_size_inv);
+    let noise = (n - 0.5) * edit.grain_amount / 100.0 * 0.4;
+    // Roughness modulates perceived chunkiness via a gamma curve on the noise magnitude.
+    // Higher roughness → power closer to 0.5 → more pronounced peaks, coarser feel.
+    let noise_scaled = sign(noise) * pow(abs(noise), mix(1.0, 0.5, grain_roughness));
+    rgb += vec3<f32>(noise_scaled);
 
     // Phase 2F: lens vignetting correction — radial brightening to compensate
     // physical falloff. Distinct from Effects.Vignette which is creative darkening.

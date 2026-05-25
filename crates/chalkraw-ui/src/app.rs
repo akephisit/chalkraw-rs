@@ -1213,6 +1213,8 @@ impl eframe::App for ChalkrawApp {
             let mut save_clicked = false;
             let mut close_clicked = false;
             let mut remove_layer: Option<usize> = None;
+            let mut move_up_layer: Option<usize> = None;
+            let mut move_down_layer: Option<usize> = None;
             let mut add_layer = false;
 
             egui::Window::new("Watermark Preset Editor")
@@ -1261,6 +1263,8 @@ impl eframe::App for ChalkrawApp {
                         chalkraw_core::TextColor { r: arr[0], g: arr[1], b: arr[2], a: arr[3] }
                     }
 
+                    // Capture layer count before the mutable borrow in iter_mut().
+                    let layer_count = editor.current.layers.len();
                     for (idx, layer) in editor.current.layers.iter_mut().enumerate() {
                         let is_expanded = editor.expanded_layer == Some(idx);
                         match layer {
@@ -1333,6 +1337,23 @@ impl eframe::App for ChalkrawApp {
                                 {
                                     editor.expanded_layer = if is_expanded { None } else { Some(idx) };
                                 }
+                                // Reorder / delete buttons shown next to every layer row.
+                                // Top of list = drawn first (background); bottom = drawn last (foreground).
+                                ui.horizontal(|ui| {
+                                    ui.add_enabled_ui(idx > 0, |ui| {
+                                        if ui.small_button("↑").on_hover_text("Move layer earlier (further back)").clicked() {
+                                            move_up_layer = Some(idx);
+                                        }
+                                    });
+                                    ui.add_enabled_ui(idx + 1 < layer_count, |ui| {
+                                        if ui.small_button("↓").on_hover_text("Move layer later (further front)").clicked() {
+                                            move_down_layer = Some(idx);
+                                        }
+                                    });
+                                    if ui.small_button("✕").on_hover_text("Delete layer").clicked() {
+                                        remove_layer = Some(idx);
+                                    }
+                                });
                             }
                             chalkraw_core::WatermarkLayer::Text(ref mut txt) => {
                                 let header_text = format!(
@@ -1409,6 +1430,23 @@ impl eframe::App for ChalkrawApp {
                                 {
                                     editor.expanded_layer = if is_expanded { None } else { Some(idx) };
                                 }
+                                // Reorder / delete buttons shown next to every layer row.
+                                // Top of list = drawn first (background); bottom = drawn last (foreground).
+                                ui.horizontal(|ui| {
+                                    ui.add_enabled_ui(idx > 0, |ui| {
+                                        if ui.small_button("↑").on_hover_text("Move layer earlier (further back)").clicked() {
+                                            move_up_layer = Some(idx);
+                                        }
+                                    });
+                                    ui.add_enabled_ui(idx + 1 < layer_count, |ui| {
+                                        if ui.small_button("↓").on_hover_text("Move layer later (further front)").clicked() {
+                                            move_down_layer = Some(idx);
+                                        }
+                                    });
+                                    if ui.small_button("✕").on_hover_text("Delete layer").clicked() {
+                                        remove_layer = Some(idx);
+                                    }
+                                });
                             }
                         }
                     }
@@ -1441,6 +1479,27 @@ impl eframe::App for ChalkrawApp {
                 editor.current.layers.remove(idx);
                 if editor.expanded_layer == Some(idx) {
                     editor.expanded_layer = None;
+                }
+            } else if let Some(idx) = move_up_layer {
+                if idx > 0 {
+                    editor.current.layers.swap(idx, idx - 1);
+                    // Keep the expanded row tracking consistent after the swap.
+                    if editor.expanded_layer == Some(idx) {
+                        editor.expanded_layer = Some(idx - 1);
+                    } else if editor.expanded_layer == Some(idx - 1) {
+                        editor.expanded_layer = Some(idx);
+                    }
+                }
+            } else if let Some(idx) = move_down_layer {
+                let len = editor.current.layers.len();
+                if idx + 1 < len {
+                    editor.current.layers.swap(idx, idx + 1);
+                    // Keep the expanded row tracking consistent after the swap.
+                    if editor.expanded_layer == Some(idx) {
+                        editor.expanded_layer = Some(idx + 1);
+                    } else if editor.expanded_layer == Some(idx + 1) {
+                        editor.expanded_layer = Some(idx);
+                    }
                 }
             }
             if add_layer {
