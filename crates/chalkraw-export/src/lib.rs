@@ -5,8 +5,9 @@ pub mod text;
 use chalkraw_core::EditState;
 use chalkraw_io::LinearImage;
 use chalkraw_render::{
-    make_target, make_tone_curve_lut, read_to_cpu, BilateralPipeline, BlurPipeline,
-    create_pingpong, DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice, SourceTexture,
+    make_target, make_tone_curve_lut, make_identity_3d_lut, read_to_cpu, BilateralPipeline,
+    BlurPipeline, create_pingpong, DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice,
+    SourceTexture,
 };
 use std::path::{Path, PathBuf};
 
@@ -145,8 +146,10 @@ pub fn export_current(
     bilat.render_pass(&source.view, &nr_b, 2.0, sigma_range, 3.0);
 
     // Build the tone-curve LUT from the current edit's point curve.
+    // Export always uses an identity display LUT (no monitor ICC transform needed for file export).
     let (_lut_tex, lut_view) = make_tone_curve_lut(rd, &edit.tone_curve.rgb.0);
-    let bind_group = pipeline.make_bind_group(&source, &clarity_b, &sharp_b, &texture_b, &nr_b, &lut_view);
+    let (_dlut_tex, dlut_view) = make_identity_3d_lut(rd);
+    let bind_group = pipeline.make_bind_group(&source, &clarity_b, &sharp_b, &texture_b, &nr_b, &lut_view, &dlut_view);
 
     let (target, view) = make_target(rd, out_w, out_h);
     pipeline.render(&view, &bind_group);
@@ -246,8 +249,10 @@ fn export_single_item(
     bilat.render_pass(&source.view, &nr_b, 2.0, sigma_range, 3.0);
 
     // Build the tone-curve LUT from the current edit's point curve.
+    // Export always uses an identity display LUT (no monitor ICC transform needed for file export).
     let (_lut_tex, lut_view) = make_tone_curve_lut(rd, &item.edit.tone_curve.rgb.0);
-    let bind_group = pipeline.make_bind_group(&source, &clarity_b, &sharp_b, &texture_b, &nr_b, &lut_view);
+    let (_dlut_tex, dlut_view) = make_identity_3d_lut(rd);
+    let bind_group = pipeline.make_bind_group(&source, &clarity_b, &sharp_b, &texture_b, &nr_b, &lut_view, &dlut_view);
 
     let (target, view) = make_target(rd, out_w, out_h);
     pipeline.render(&view, &bind_group);

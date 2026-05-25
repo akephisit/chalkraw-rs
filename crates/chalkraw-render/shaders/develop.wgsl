@@ -82,7 +82,9 @@
 // 432   atmospheric_light  vec4<f32>   .rgb = [r, g, b], .w = 0.0
 // Phase 2D polish (Point Curve LUT): vec4<u32> = 16 bytes.
 // 448   tone_curve_pad     vec4<u32>   .x = tone_curve_active (1 = LUT active), .yzw = padding
-// Total: 464 bytes.
+// Phase 8 polish (Display LUT): vec4<u32> = 16 bytes.
+// 464   display_lut_pad    vec4<u32>   .x = display_lut_active (1 = use 3D LUT), .yzw = padding
+// Total: 480 bytes.
 
 struct EditUniforms {
     exposure:           f32,
@@ -160,6 +162,9 @@ struct EditUniforms {
     // Phase 2D polish: Point Curve LUT active flag (offset 448..464).
     // Packed as vec4<u32> to match Rust layout: .x = tone_curve_active, .yzw = padding.
     tone_curve_pad:     vec4<u32>,
+    // Phase 8 polish: Display 3D LUT active flag (offset 464..480).
+    // Packed as vec4<u32> to match Rust layout: .x = display_lut_active, .yzw = padding.
+    display_lut_pad:    vec4<u32>,
 };
 
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
@@ -175,6 +180,8 @@ struct EditUniforms {
 @group(0) @binding(6) var nr_blur_tex: texture_2d<f32>;
 // Phase 2D polish: 256-entry R16Float 1D LUT for the point curve (per-channel).
 @group(0) @binding(7) var tone_curve_lut: texture_1d<f32>;
+// Phase 8 polish: 32×32×32 Rgba16Float 3D LUT for sRGB→display colour mapping.
+@group(0) @binding(8) var display_lut: texture_3d<f32>;
 
 // ── Luma helper (BT.601 coefficients) ────────────────────────────────────────
 // Used by the Phase 2E.4 Noise Reduction pass to split luminance from chroma.
@@ -599,10 +606,20 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let lv_amount = edit.lens_vignetting / 100.0;
     rgb *= 1.0 + lv_amount * r_corr * r_corr * 0.5;
 
-    // Phase 0.13.2: manual sRGB encode — only when the output surface is not
-    // sRGB-coded (e.g. Bgra8Unorm on Windows). Clamp first to keep pow() safe.
-    // srgb_pad.x = srgb_output flag (1 = manual encode).
-    if (edit.srgb_pad.x == 1u) {
+    // Phase 8 polish: display 3D LUT (sRGB → display colour space).
+    // When a non-sRGB display profile was found, sample the 32×32×32 LUT which
+    // already encodes the full sRGB-encode + colour-space conversion. In that case
+    // we skip the manual sRGB encode below (the LUT handles it).
+    // When the display profile is sRGB (or unavailable), fall through to the
+    // standard manual sRGB encode path guarded by srgb_pad.x.
+    if (edit.display_lut_pad.x == 1u) {
+        // Clamp to [0,1] before sampling — the LUT is defined on that domain.
+        let clamped = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+        rgb = textureSample(display_lut, source_sampler, clamped).rgb;
+    } else if (edit.srgb_pad.x == 1u) {
+        // Phase 0.13.2: manual sRGB encode — only when the output surface is not
+        // sRGB-coded (e.g. Bgra8Unorm on Windows). Clamp first to keep pow() safe.
+        // srgb_pad.x = srgb_output flag (1 = manual encode).
         rgb = vec3<f32>(
             linear_to_srgb(clamp(rgb.r, 0.0, 1.0)),
             linear_to_srgb(clamp(rgb.g, 0.0, 1.0)),

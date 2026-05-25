@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "chalkraw-catalog"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "bincode",
  "chalkraw-core",
@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "chalkraw-core"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "bincode",
  "chrono",
@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "chalkraw-export"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "ab_glyph",
  "chalkraw-core",
@@ -738,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "chalkraw-io"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "chalkraw-core",
  "image",
@@ -752,19 +752,21 @@ dependencies = [
 
 [[package]]
 name = "chalkraw-render"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "bytemuck",
  "chalkraw-core",
  "log",
  "pollster",
+ "qcms",
  "thiserror 2.0.18",
  "wgpu",
+ "windows",
 ]
 
 [[package]]
 name = "chalkraw-ui"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "blake3",

@@ -3,6 +3,7 @@ use chalkraw_io::LinearImage;
 use chalkraw_render::{
     create_pingpong, f32_to_f16_bits, BilateralPipeline, BlurPipeline, DevelopPipeline,
     EditUniforms, PipelineConfig, RenderDevice, SourceTexture,
+    display_profile,
 };
 use egui::PaintCallbackInfo;
 use egui_wgpu::CallbackTrait;
@@ -57,6 +58,15 @@ pub struct CanvasGpu {
     pub tone_curve_lut_tex: ewgpu::Texture,
     #[allow(dead_code)]
     pub tone_curve_lut_view: ewgpu::TextureView,
+    /// Display 3D LUT — 32×32×32 Rgba16Float. Identity when no display profile,
+    /// sRGB→display mapping when a non-sRGB monitor ICC profile was found.
+    #[allow(dead_code)]
+    pub display_lut_tex: ewgpu::Texture,
+    #[allow(dead_code)]
+    pub display_lut_view: ewgpu::TextureView,
+    /// True when the display LUT contains a real non-identity mapping.
+    #[allow(dead_code)]
+    pub display_lut_active: bool,
     pub bind_group: ewgpu::BindGroup,
     /// wgpu queue needed for LUT uploads after initial creation.
     queue: Arc<ewgpu::Queue>,
@@ -110,13 +120,34 @@ impl CanvasGpu {
             ewgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
         );
 
+        // Phase 8 polish: build display 3D LUT from monitor ICC profile (Windows only;
+        // macOS/Linux fall back to identity LUT, display_lut_active = false).
+        let (display_lut_tex, display_lut_view, display_lut_active) = {
+            let maybe_lut = display_profile::read_display_icc_profile()
+                .and_then(|icc| display_profile::build_srgb_to_display_lut(&icc));
+            match maybe_lut {
+                Some(lut) => {
+                    // Use egui_wgpu's wgpu type aliases — the RenderDevice's device/queue
+                    // are already the same type (they come from eframe's wgpu instance).
+                    let (tex, view) = display_profile::upload_lut_3d(rd, &lut);
+                    (tex, view, true)
+                }
+                None => {
+                    // Identity LUT: no colour transformation, display_lut_active stays false.
+                    let identity = display_profile::build_identity_lut();
+                    let (tex, view) = display_profile::upload_lut_3d(rd, &identity);
+                    (tex, view, false)
+                }
+            }
+        };
+
         // Build the develop bind group pointing at the final blur result textures.
         let bind_group = pipeline.make_bind_group(
             &source, &clarity_view_b, &sharp_view_b, &texture_view_b, &nr_view_b,
-            &tone_curve_lut_view,
+            &tone_curve_lut_view, &display_lut_view,
         );
         let queue = rd.queue.clone();
-        let me = Self {
+        let mut me = Self {
             source,
             pipeline,
             blur_pipeline,
@@ -139,9 +170,13 @@ impl CanvasGpu {
             nr_view_b,
             tone_curve_lut_tex,
             tone_curve_lut_view,
+            display_lut_tex,
+            display_lut_view,
+            display_lut_active,
             bind_group,
             queue,
         };
+        me.pipeline.set_display_lut_active(display_lut_active);
         // Run initial blurs at image-load time.
         // Clarity sigma=16 px (large); Sharpening default radius=1.0 px (small);
         // Texture sigma=5 px (mid-frequency); NR uses bilateral filter (nr_amount=0 → identity).

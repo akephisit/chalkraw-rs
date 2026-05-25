@@ -1,7 +1,7 @@
 use chalkraw_core::EditState;
 use chalkraw_render::{
-    make_identity_lut, make_target, read_to_cpu, DevelopPipeline, EditUniforms, PipelineConfig,
-    RenderDevice, SourceTexture,
+    make_identity_lut, make_identity_3d_lut, make_target, read_to_cpu, DevelopPipeline,
+    EditUniforms, PipelineConfig, RenderDevice, SourceTexture,
 };
 
 fn solid_image(w: u32, h: u32, gray: f32) -> Vec<f32> {
@@ -27,9 +27,10 @@ fn exposure_zero_returns_input_brightness() {
     edit.tone.exposure = 0.0;
     pipe.update_uniforms(&EditUniforms::from(&edit));
     // Pass source.view for all blur views (Clarity/Sharpening/Texture/NR not exercised).
-    // Pass identity LUT for tone curve (no effect).
+    // Pass identity LUT for tone curve (no effect). Pass identity 3D LUT for display profile.
     let (_lut_tex, lut_view) = make_identity_lut(&rd);
-    let bg = pipe.make_bind_group(&src, &src.view, &src.view, &src.view, &src.view, &lut_view);
+    let (_dlut_tex, dlut_view) = make_identity_3d_lut(&rd);
+    let bg = pipe.make_bind_group(&src, &src.view, &src.view, &src.view, &src.view, &lut_view, &dlut_view);
     let (tex, view) = make_target(&rd, w, h);
     pipe.render(&view, &bg);
     let pixels = read_to_cpu(&rd, &tex, w, h).unwrap();
@@ -52,9 +53,10 @@ fn exposure_plus_one_doubles_linear_brightness() {
     edit.tone.exposure = 1.0; // 2× linear
     pipe.update_uniforms(&EditUniforms::from(&edit));
     // Pass source.view for all blur views (Clarity/Sharpening/Texture/NR not exercised).
-    // Pass identity LUT for tone curve (no effect).
+    // Pass identity LUT for tone curve (no effect). Pass identity 3D LUT for display profile.
     let (_lut_tex, lut_view) = make_identity_lut(&rd);
-    let bg = pipe.make_bind_group(&src, &src.view, &src.view, &src.view, &src.view, &lut_view);
+    let (_dlut_tex, dlut_view) = make_identity_3d_lut(&rd);
+    let bg = pipe.make_bind_group(&src, &src.view, &src.view, &src.view, &src.view, &lut_view, &dlut_view);
     let (tex, view) = make_target(&rd, w, h);
     pipe.render(&view, &bg);
     let pixels = read_to_cpu(&rd, &tex, w, h).unwrap();

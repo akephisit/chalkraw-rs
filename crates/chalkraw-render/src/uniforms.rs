@@ -80,7 +80,10 @@ use chalkraw_core::{curve_is_identity, EditState};
 /// Phase 2D polish (Point Curve LUT): 1 × u32 + 3-u32 pad = 16 bytes.
 /// 448  tone_curve_active   u32   (1 = LUT active, 0 = identity — skip texture sample)
 /// 452  _pad_tca            [u32;3]
-/// Total: 464 bytes
+/// Phase 8 polish (Display LUT): 1 × u32 + 3-u32 pad = 16 bytes.
+/// 464  display_lut_active  u32   (1 = sample 3D display LUT, 0 = standard sRGB encode)
+/// 468  _pad_dla            [u32;3]
+/// Total: 480 bytes
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct EditUniforms {
@@ -161,6 +164,9 @@ pub struct EditUniforms {
     // Phase 2D polish: Point Curve LUT active flag (u32 + 3-u32 pad = 16 bytes).
     pub tone_curve_active: u32,      // offset 448  (1 = LUT active, 0 = skip)
     pub _pad_tca: [u32; 3],          // offset 452  → pads to 464
+    // Phase 8 polish: Display 3D LUT active flag (u32 + 3-u32 pad = 16 bytes).
+    pub display_lut_active: u32,     // offset 464  (1 = sample display LUT, 0 = standard sRGB encode)
+    pub _pad_dla: [u32; 3],          // offset 468  → pads to 480
 }
 
 impl From<&EditState> for EditUniforms {
@@ -249,6 +255,10 @@ impl From<&EditState> for EditUniforms {
             // Phase 2D polish: Point Curve LUT active flag.
             tone_curve_active: if curve_is_identity(&e.tone_curve.rgb) { 0 } else { 1 },
             _pad_tca: [0; 3],
+            // Phase 8 polish: display_lut_active is set by DevelopPipeline::update_uniforms;
+            // default 0 here (standard sRGB encode path).
+            display_lut_active: 0,
+            _pad_dla: [0; 3],
         }
     }
 }
@@ -259,7 +269,7 @@ mod tests {
 
     #[test]
     fn edit_uniforms_size_matches_wgsl() {
-        // Must be 464 bytes to match the WGSL EditUniforms struct layout.
+        // Must be 480 bytes to match the WGSL EditUniforms struct layout.
         // Phase 2A: 128 bytes. Phase 2B adds 6 × vec4<f32> = 96 bytes → 224.
         // Phase 2C adds 4 × vec4<f32> = 64 bytes → 288.
         // Phase 2D adds 1 × vec4<f32> = 16 bytes → 304.
@@ -271,10 +281,11 @@ mod tests {
         // Phase 2E polish adds sharpening_detail + sharpening_masking + 2-f32 pad = 16 bytes → 432.
         // v0.19.1 adds atmospheric_light vec4<f32> = 16 bytes → 448.
         // Phase 2D polish adds tone_curve_active (u32) + 3-u32 pad = 16 bytes → 464.
+        // Phase 8 polish adds display_lut_active (u32) + 3-u32 pad = 16 bytes → 480.
         // If this fails, check that the Rust and WGSL fields are in sync.
         assert_eq!(
             std::mem::size_of::<EditUniforms>(),
-            464,
+            480,
             "EditUniforms size mismatch — Rust and WGSL structs are out of sync"
         );
     }

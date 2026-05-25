@@ -31,6 +31,10 @@ pub struct DevelopPipeline {
     /// Per-image atmospheric light for DCP Dehaze, estimated once at source
     /// upload from the top 0.1% brightest dark-channel pixels.
     pub atmospheric_light: [f32; 3],
+    /// True when a non-sRGB display ICC profile was found and a real
+    /// sRGB→display 3D LUT was built. The uniform flag `display_lut_active`
+    /// is set to 1 when this is true, replacing the manual sRGB encode.
+    pub display_lut_active: bool,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
 }
@@ -137,6 +141,17 @@ impl DevelopPipeline {
                     },
                     count: None,
                 },
+                // Phase 8 polish: 32×32×32 Rgba16Float D3 LUT for sRGB→display mapping.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -198,6 +213,8 @@ impl DevelopPipeline {
             manual_srgb_needed,
             // Default to white until the caller sets a per-image estimate.
             atmospheric_light: [0.95, 0.95, 0.95],
+            // Display LUT inactive by default; caller sets this after building the LUT.
+            display_lut_active: false,
             device: rd.device.clone(),
             queue: rd.queue.clone(),
         }
@@ -222,7 +239,17 @@ impl DevelopPipeline {
             self.atmospheric_light[2],
             0.0,
         ];
+        // Phase 8 polish: when a real sRGB→display LUT is active, the shader uses
+        // it instead of the manual sRGB encode. The two flags are mutually exclusive:
+        // display_lut_active=1 overrides srgb_output in the shader.
+        copy.display_lut_active = if self.display_lut_active { 1 } else { 0 };
+        copy._pad_dla = [0; 3];
         self.queue.write_buffer(&self.uniform_buffer, 0, bytes_of(&copy));
+    }
+
+    /// Set whether the display 3D LUT is active (non-sRGB display profile found).
+    pub fn set_display_lut_active(&mut self, active: bool) {
+        self.display_lut_active = active;
     }
 
     /// Build a bind group for the develop pipeline.
@@ -235,8 +262,11 @@ impl DevelopPipeline {
     /// `nr_blur_view` should be an Rgba16Float view of the NR blur (sigma=2px).
     /// `tone_curve_lut_view` should be an R16Float 1D texture view (256 entries)
     /// for the point-curve LUT.
+    /// `display_lut_view` should be an Rgba16Float 3D texture view (32×32×32)
+    /// for the sRGB→display 3D LUT (identity or real profile).
     /// Pass `&source.view` for any arg in callers that do not exercise those
     /// effects — with the relevant slider at 0 the term is zero.
+    #[allow(clippy::too_many_arguments)]
     pub fn make_bind_group(
         &self,
         source: &SourceTexture,
@@ -245,6 +275,7 @@ impl DevelopPipeline {
         texture_blur_view: &wgpu::TextureView,
         nr_blur_view: &wgpu::TextureView,
         tone_curve_lut_view: &wgpu::TextureView,
+        display_lut_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("develop bg"),
@@ -258,6 +289,7 @@ impl DevelopPipeline {
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(texture_blur_view) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(nr_blur_view) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(tone_curve_lut_view) },
+                wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(display_lut_view) },
             ],
         })
     }

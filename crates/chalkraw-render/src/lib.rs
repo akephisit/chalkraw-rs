@@ -1,6 +1,7 @@
 pub mod bilateral;
 pub mod blur;
 pub mod device;
+pub mod display_profile;
 pub mod error;
 pub mod pipeline;
 pub mod readback;

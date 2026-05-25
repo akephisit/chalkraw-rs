@@ -56,6 +56,14 @@ pub fn make_tone_curve_lut(rd: &RenderDevice, points: &[chalkraw_core::CurvePoin
     (tex, view)
 }
 
+/// Create a 32×32×32 Rgba16Float identity 3D LUT texture + view.
+/// Used by render tests as a stand-in for the real display-profile LUT
+/// (identity → no colour-space change, display_lut_active=0).
+pub fn make_identity_3d_lut(rd: &RenderDevice) -> (wgpu::Texture, wgpu::TextureView) {
+    let lut = crate::display_profile::build_identity_lut();
+    crate::display_profile::upload_lut_3d(rd, &lut)
+}
+
 pub fn make_target(rd: &RenderDevice, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = rd.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("readback target"),
