@@ -4,9 +4,16 @@
 //! then uses qcms to build a 32×32×32 sRGB→display 3D LUT that is uploaded to
 //! the GPU as an Rgba16Float D3 texture (binding 8).
 //!
-//! macOS and Linux return `None` from `read_display_icc_profile()` for now;
-//! ColorSync / colord integration is a future polish item. An identity LUT is
-//! always uploaded so binding 8 is always populated.
+//! On macOS, scans `/System/Library/ColorSync/Profiles/` for the default Display P3
+//! or sRGB profile. A proper `CGDisplayCopyColorSpace` + CoreGraphics integration is
+//! future work; this file-scan stub picks a reasonable default that covers most modern
+//! Macs. Multi-monitor profile selection is out of scope for v1.
+//!
+//! On Linux, respects the `CHALKRAW_DISPLAY_PROFILE` environment variable override
+//! first, then scans standard XDG locations (`/usr/share/color/icc/`,
+//! `~/.color/icc/`). colord D-Bus integration via zbus is future work.
+//!
+//! An identity LUT is always uploaded so binding 8 is always populated.
 
 use crate::device::RenderDevice;
 use crate::source::f32_to_f16_bits;
@@ -18,14 +25,28 @@ pub struct DisplayLut {
     pub size: u32,      // 32
 }
 
-/// Read the primary display's ICC profile. Returns `None` on macOS/Linux
-/// (sRGB assumed) or when the profile cannot be obtained.
+/// Read the primary display's ICC profile. Returns `None` when the profile
+/// cannot be obtained (sRGB / identity LUT is used as fallback).
+///
+/// - **Windows**: queries `GetICMProfileW` for the primary monitor's profile.
+/// - **macOS**: scans `/System/Library/ColorSync/Profiles/` for Display P3 or
+///   sRGB (file-scan stub; real `CGDisplayCopyColorSpace` integration is future work).
+/// - **Linux**: checks `CHALKRAW_DISPLAY_PROFILE` env var, then common XDG paths.
+/// - **Other**: always returns `None`.
 pub fn read_display_icc_profile() -> Option<Vec<u8>> {
     #[cfg(windows)]
     {
         windows_impl::read_primary_monitor_profile()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_impl::read_main_display_profile()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_impl::read_main_display_profile()
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         None
     }
@@ -141,6 +162,106 @@ pub fn upload_lut_3d(rd: &RenderDevice, lut: &DisplayLut) -> (wgpu::Texture, wgp
     );
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     (tex, view)
+}
+
+// ── macOS implementation ──────────────────────────────────────────────────────
+//
+// v1 stub: scan the standard ColorSync system profile directory for the active
+// display profile. Most modern Macs use Display P3 for the built-in panel;
+// external monitors typically report sRGB.
+//
+// A proper implementation would call `CGMainDisplayID()` →
+// `CGDisplayCopyColorSpace()` → `CGColorSpaceCopyICCData()` to obtain the
+// *actual* profile for whichever display is currently active. That requires the
+// `core-graphics` crate and careful unsafe FFI. It is tracked as future work so
+// that v1 ships reliably without the extra compile-time dependency.
+
+#[cfg(target_os = "macos")]
+mod macos_impl {
+    pub fn read_main_display_profile() -> Option<Vec<u8>> {
+        // These are the two profiles that ship with every macOS installation and
+        // cover the vast majority of Apple hardware. We try Display P3 first
+        // because that is the default for all Apple Silicon / Retina panels.
+        let candidates = [
+            "/System/Library/ColorSync/Profiles/Display P3.icc",
+            "/System/Library/ColorSync/Profiles/sRGB Profile.icc",
+        ];
+        for path in candidates {
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    log::info!("display_profile (macOS): using {}", path);
+                    return Some(bytes);
+                }
+                Err(e) => {
+                    log::debug!("display_profile (macOS): skipping {}: {}", path, e);
+                }
+            }
+        }
+        log::info!("display_profile (macOS): no ColorSync profile found; will use identity LUT");
+        None
+    }
+}
+
+// ── Linux implementation ──────────────────────────────────────────────────────
+//
+// v1 stub: check a user-supplied env-var path first (useful on multi-monitor
+// setups), then scan the standard ICC directories defined by the ICC and
+// freedesktop.org colour management specifications.
+//
+// A richer implementation would query the colord D-Bus service (via the `zbus`
+// crate) to get the actual calibrated profile for each connected output. That
+// integration is tracked as future work; the env-var escape hatch and standard
+// sRGB fallback are sufficient for v1.
+
+#[cfg(target_os = "linux")]
+mod linux_impl {
+    pub fn read_main_display_profile() -> Option<Vec<u8>> {
+        // 1. User-supplied override — highest priority.
+        if let Ok(path) = std::env::var("CHALKRAW_DISPLAY_PROFILE") {
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    log::info!(
+                        "display_profile (Linux): using CHALKRAW_DISPLAY_PROFILE = {}",
+                        path
+                    );
+                    return Some(bytes);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "display_profile (Linux): CHALKRAW_DISPLAY_PROFILE={} unreadable: {}",
+                        path,
+                        e
+                    );
+                }
+            }
+        }
+
+        // 2. System and per-user ICC profile directories.
+        //    Order: system-wide vendor profiles, then user directory.
+        let mut candidates: Vec<String> = vec![
+            "/usr/share/color/icc/sRGB.icc".to_string(),
+            "/usr/share/color/icc/colord/sRGB.icc".to_string(),
+            "/usr/share/color/icc/ghostscript/srgb.icc".to_string(),
+        ];
+        if let Ok(home) = std::env::var("HOME") {
+            candidates.push(format!("{home}/.color/icc/profile.icc"));
+        }
+
+        for path in &candidates {
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    log::info!("display_profile (Linux): using {}", path);
+                    return Some(bytes);
+                }
+                Err(e) => {
+                    log::debug!("display_profile (Linux): skipping {}: {}", path, e);
+                }
+            }
+        }
+
+        log::info!("display_profile (Linux): no ICC profile found; will use identity LUT");
+        None
+    }
 }
 
 // ── Windows implementation ────────────────────────────────────────────────────
