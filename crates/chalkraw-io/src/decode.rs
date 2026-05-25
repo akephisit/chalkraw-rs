@@ -1,6 +1,7 @@
 use crate::error::IoError;
 use chalkraw_core::ImageFormat;
 use image::ImageReader;
+use rayon::prelude::*;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -69,8 +70,8 @@ pub(crate) fn find_embedded_jpeg(bytes: &[u8]) -> Option<Vec<u8>> {
 
 /// Decode a RAW file via rawloader.
 ///
-/// Priority order (Phase 4 v2):
-/// 1. Full-resolution bilinear Bayer demosaic (real RAW decode).
+/// Priority order (Phase 4 v3 — AHD):
+/// 1. Full-resolution AHD-style directional Bayer demosaic (real RAW decode).
 /// 2. Embedded JPEG preview (fast, camera-processed, 8-bit fallback).
 /// 3. Half-resolution greyscale average (last resort).
 fn decode_raw(path: PathBuf, raw_format: chalkraw_core::RawFormat) -> Result<LinearImage, IoError> {
@@ -84,11 +85,11 @@ fn decode_raw(path: PathBuf, raw_format: chalkraw_core::RawFormat) -> Result<Lin
         rawloader::decode(&mut reader).ok()
     };
 
-    // ── 1. Try real bilinear demosaic ──────────────────────────────────────
+    // ── 1. Try AHD-style directional demosaic ─────────────────────────────
     if let Some(ref raw_img) = raw {
-        if let Some(rgb_f32) = demosaic_bilinear(raw_img) {
+        if let Some(rgb_f32) = demosaic_ahd(raw_img) {
             log::info!(
-                "decode_raw {path:?}: bilinear demosaic {}x{}",
+                "decode_raw {path:?}: AHD demosaic {}x{}",
                 rgb_f32.width(),
                 rgb_f32.height()
             );
@@ -143,6 +144,9 @@ fn decode_raw(path: PathBuf, raw_format: chalkraw_core::RawFormat) -> Result<Lin
 
 /// Full-resolution bilinear Bayer demosaic.
 ///
+/// Retained as a reference implementation and potential fallback.
+/// The active demosaic path is [`demosaic_ahd`].
+///
 /// For each output pixel the known channel comes directly from the sensor;
 /// the two missing channels are interpolated by averaging all neighbours of
 /// that colour within the 3×3 window centred on the pixel.
@@ -157,6 +161,7 @@ fn decode_raw(path: PathBuf, raw_format: chalkraw_core::RawFormat) -> Result<Lin
 ///
 /// Returns `None` if the image is monochrome, too small, or uses an
 /// unsupported (non-Bayer) CFA pattern.
+#[allow(dead_code)]
 fn demosaic_bilinear(
     raw: &rawloader::RawImage,
 ) -> Option<image::ImageBuffer<image::Rgb<f32>, Vec<f32>>> {
@@ -304,6 +309,241 @@ fn demosaic_bilinear(
     }
 
     Some(buf)
+}
+
+/// Multiply two 3×3 f32 matrices: out = a * b.
+fn matmul_3x3(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut out = [[0.0f32; 3]; 3];
+    for r in 0..3 {
+        for c in 0..3 {
+            for k in 0..3 {
+                out[r][c] += a[r][k] * b[k][c];
+            }
+        }
+    }
+    out
+}
+
+/// AHD-style (Adaptive Homogeneity-Directed) demosaic — simplified directional variant.
+///
+/// Stage 1 – Green reconstruction at R/B sites:
+///   Two candidate G values are computed (horizontal average and vertical average)
+///   each corrected with a 2nd-order curvature term (the "AHD correction").
+///   The direction with the smaller gradient wins.  Edge pixels (within 2 px of the
+///   border) fall back to plain 4-neighbour bilinear.
+///
+/// Stage 2 – R and B reconstruction:
+///   Missing R (or B) values are estimated by averaging the colour difference
+///   (R − G) from the nearest R (or B) neighbours and adding it back to the
+///   already-known G at each site.  This is smoother than interpolating R/B
+///   directly because the difference channel has far less high-frequency energy.
+///
+/// The camera-to-XYZ-D65 matrix from rawloader is combined with the standard
+/// XYZ-D65 → linear-sRGB matrix and applied per pixel, identical to the
+/// previous bilinear path.
+///
+/// Returns `None` for monochrome sensors, cpp != 1, images smaller than 4×4,
+/// or invalid CFA patterns.
+#[allow(clippy::needless_range_loop)] // `x` is used as a 2-D coordinate, not just an index
+fn demosaic_ahd(raw: &rawloader::RawImage) -> Option<image::ImageBuffer<image::Rgb<f32>, Vec<f32>>> {
+    let (w, h) = (raw.width, raw.height);
+    if w < 4 || h < 4 || raw.cpp != 1 {
+        return None;
+    }
+    let cfa = raw.cropped_cfa();
+    if !cfa.is_valid() {
+        return None;
+    }
+
+    // ── Normalise raw values per-channel using black/white levels ─────────
+    let raw_normalised: Vec<f32> = match &raw.data {
+        rawloader::RawImageData::Integer(d) => d
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                let y = i / w;
+                let x = i % w;
+                let ch = cfa.color_at(y, x).min(3);
+                let bl = raw.blacklevels[ch] as f32;
+                let wl = (raw.whitelevels[ch] as f32 - bl).max(1.0);
+                ((v as f32 - bl) / wl).clamp(0.0, 1.0)
+            })
+            .collect(),
+        rawloader::RawImageData::Float(d) => {
+            d.iter().copied().map(|v| v.clamp(0.0, 1.0)).collect()
+        }
+    };
+
+    let get = |y: usize, x: usize| -> f32 { raw_normalised[y * w + x] };
+
+    // ── Stage 1: G channel reconstruction (parallel, row-by-row) ─────────
+    let g_rows: Vec<Vec<f32>> = (0..h)
+        .into_par_iter()
+        .map(|y| {
+            let mut row = vec![0.0f32; w];
+            for x in 0..w {
+                let cc = cfa.color_at(y, x);
+                let val = if cc == 1 {
+                    // Already a green site.
+                    get(y, x)
+                } else if y >= 2 && y < h - 2 && x >= 2 && x < w - 2 {
+                    // R or B site — directional interpolation with curvature correction.
+                    let c = get(y, x);
+                    // Horizontal candidate.
+                    let gh = (get(y, x - 1) + get(y, x + 1)) * 0.5
+                        + (2.0 * c - get(y, x - 2) - get(y, x + 2)) * 0.25;
+                    // Vertical candidate.
+                    let gv = (get(y - 1, x) + get(y + 1, x)) * 0.5
+                        + (2.0 * c - get(y - 2, x) - get(y + 2, x)) * 0.25;
+                    // Gradient magnitudes.
+                    let grad_h = (get(y, x - 1) - get(y, x + 1)).abs()
+                        + (2.0 * c - get(y, x - 2) - get(y, x + 2)).abs();
+                    let grad_v = (get(y - 1, x) - get(y + 1, x)).abs()
+                        + (2.0 * c - get(y - 2, x) - get(y + 2, x)).abs();
+                    if grad_h <= grad_v { gh } else { gv }
+                } else {
+                    // Border pixel: plain 4-neighbour bilinear fallback.
+                    let mut sum = 0.0f32;
+                    let mut count = 0u32;
+                    for (dy, dx) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                        let ny = y as i32 + dy;
+                        let nx = x as i32 + dx;
+                        if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                            continue;
+                        }
+                        if cfa.color_at(ny as usize, nx as usize) == 1 {
+                            sum += get(ny as usize, nx as usize);
+                            count += 1;
+                        }
+                    }
+                    if count > 0 { sum / count as f32 } else { get(y, x) }
+                };
+                row[x] = val.clamp(0.0, 1.0);
+            }
+            row
+        })
+        .collect();
+
+    // Flatten row vecs into a contiguous plane.
+    let g_plane: Vec<f32> = g_rows.into_iter().flatten().collect();
+
+    // ── Stage 2: R and B reconstruction (parallel, row-by-row) ───────────
+    // Use colour-difference interpolation: average (channel − G) from the
+    // nearest same-colour neighbours, then add back the G at the current site.
+    let rb_rows: Vec<(Vec<f32>, Vec<f32>)> = (0..h)
+        .into_par_iter()
+        .map(|y| {
+            let mut r_row = vec![0.0f32; w];
+            let mut b_row = vec![0.0f32; w];
+            for x in 0..w {
+                let cc = cfa.color_at(y, x);
+                let g_here = g_plane[y * w + x];
+
+                // Known R site: store directly.
+                if cc == 0 {
+                    r_row[x] = get(y, x);
+                } else {
+                    // Missing R: average (R − G) from R neighbours.
+                    let mut sum_diff = 0.0f32;
+                    let mut count = 0u32;
+                    for (dy, dx) in [
+                        (-1i32, -1i32), (-1, 1), (1, -1), (1, 1),
+                        (-1, 0), (1, 0), (0, -1), (0, 1),
+                    ] {
+                        let ny = y as i32 + dy;
+                        let nx = x as i32 + dx;
+                        if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                            continue;
+                        }
+                        let nyu = ny as usize;
+                        let nxu = nx as usize;
+                        if cfa.color_at(nyu, nxu) == 0 {
+                            sum_diff += get(nyu, nxu) - g_plane[nyu * w + nxu];
+                            count += 1;
+                        }
+                    }
+                    r_row[x] = if count > 0 {
+                        (g_here + sum_diff / count as f32).clamp(0.0, 1.0)
+                    } else {
+                        g_here
+                    };
+                }
+
+                // Known B site: store directly.
+                if cc == 2 {
+                    b_row[x] = get(y, x);
+                } else {
+                    // Missing B: average (B − G) from B neighbours.
+                    let mut sum_diff = 0.0f32;
+                    let mut count = 0u32;
+                    for (dy, dx) in [
+                        (-1i32, -1i32), (-1, 1), (1, -1), (1, 1),
+                        (-1, 0), (1, 0), (0, -1), (0, 1),
+                    ] {
+                        let ny = y as i32 + dy;
+                        let nx = x as i32 + dx;
+                        if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                            continue;
+                        }
+                        let nyu = ny as usize;
+                        let nxu = nx as usize;
+                        if cfa.color_at(nyu, nxu) == 2 {
+                            sum_diff += get(nyu, nxu) - g_plane[nyu * w + nxu];
+                            count += 1;
+                        }
+                    }
+                    b_row[x] = if count > 0 {
+                        (g_here + sum_diff / count as f32).clamp(0.0, 1.0)
+                    } else {
+                        g_here
+                    };
+                }
+            }
+            (r_row, b_row)
+        })
+        .collect();
+
+    let (r_plane, b_plane): (Vec<f32>, Vec<f32>) = {
+        let mut r = Vec::with_capacity(w * h);
+        let mut b = Vec::with_capacity(w * h);
+        for (rr, br) in rb_rows {
+            r.extend_from_slice(&rr);
+            b.extend_from_slice(&br);
+        }
+        (r, b)
+    };
+
+    // ── Apply camera colour matrix ─────────────────────────────────────────
+    // cam_to_xyz_normalized() → 3×4; we use only the first 3 cam channels.
+    let cam_to_xyz_raw = raw.cam_to_xyz_normalized();
+    let cam_to_xyz: [[f32; 3]; 3] = [
+        [cam_to_xyz_raw[0][0], cam_to_xyz_raw[0][1], cam_to_xyz_raw[0][2]],
+        [cam_to_xyz_raw[1][0], cam_to_xyz_raw[1][1], cam_to_xyz_raw[1][2]],
+        [cam_to_xyz_raw[2][0], cam_to_xyz_raw[2][1], cam_to_xyz_raw[2][2]],
+    ];
+    let xyz_to_srgb: [[f32; 3]; 3] = [
+        [ 3.240_454, -1.537_138_5, -0.498_531_4],
+        [-0.969_266,  1.876_010_8,  0.041_556],
+        [ 0.055_643_4, -0.204_025_9,  1.057_225_2],
+    ];
+    let m = matmul_3x3(&xyz_to_srgb, &cam_to_xyz);
+
+    // ── Assemble output image ──────────────────────────────────────────────
+    let mut out = image::ImageBuffer::<image::Rgb<f32>, _>::new(w as u32, h as u32);
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let r_cam = r_plane[i];
+            let g_cam = g_plane[i];
+            let b_cam = b_plane[i];
+            let r = (m[0][0] * r_cam + m[0][1] * g_cam + m[0][2] * b_cam).clamp(0.0, 1.0);
+            let g = (m[1][0] * r_cam + m[1][1] * g_cam + m[1][2] * b_cam).clamp(0.0, 1.0);
+            let b = (m[2][0] * r_cam + m[2][1] * g_cam + m[2][2] * b_cam).clamp(0.0, 1.0);
+            out.put_pixel(x as u32, y as u32, image::Rgb([r, g, b]));
+        }
+    }
+
+    Some(out)
 }
 
 /// Convert an Rgb<f32> image buffer into a `LinearImage` (RGBA f32, alpha=1).

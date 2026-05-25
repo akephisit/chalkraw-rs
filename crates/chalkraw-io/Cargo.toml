@@ -11,6 +11,7 @@ image = { workspace = true }
 kamadak-exif = { workspace = true }
 log = { workspace = true }
 qcms = { workspace = true }
+rayon = { workspace = true }
 rawloader = { workspace = true }
 thiserror = { workspace = true }
 
