@@ -58,6 +58,114 @@ fn slider_scroll_suffix(
     changed
 }
 
+// ── Colour Wheel Widget ───────────────────────────────────────────────────────
+
+fn hsv_to_color32(h_deg: f32, s: f32, v: f32) -> egui::Color32 {
+    let h = h_deg / 60.0;
+    let i = h.floor() as i32;
+    let f = h - i as f32;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    let (r, g, b) = match i.rem_euclid(6) {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    egui::Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+}
+
+/// Interactive colour wheel + hue/saturation readout.
+///
+/// Draws a 130×130 hue-spectrum disc; the draggable dot's angle encodes hue
+/// (0..360°) and its distance from centre encodes saturation (0..100).
+/// Right-click resets to neutral (H=0, S=0).  Returns `true` when changed.
+pub fn color_wheel_widget(
+    ui: &mut egui::Ui,
+    grade: &mut chalkraw_core::GradeTone,
+) -> bool {
+    let mut changed = false;
+    let desired = egui::vec2(140.0, 160.0); // 140 for wheel + 20 for label
+    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click_and_drag());
+
+    let wheel_size = 130.0;
+    let wheel_rect = egui::Rect::from_center_size(
+        rect.center_top() + egui::vec2(0.0, wheel_size * 0.5 + 5.0),
+        egui::vec2(wheel_size, wheel_size),
+    );
+    let centre = wheel_rect.center();
+    let radius = wheel_size * 0.5;
+
+    let painter = ui.painter();
+
+    // Draw the colour wheel via discrete arc segments.
+    let segments = 64;
+    for i in 0..segments {
+        let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+        let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+        let hue_mid = (a0 + a1) * 0.5 / std::f32::consts::TAU * 360.0;
+        let inner_p0 = centre;
+        let outer_p0 = centre + egui::vec2(a0.cos(), a0.sin()) * radius;
+        let outer_p1 = centre + egui::vec2(a1.cos(), a1.sin()) * radius;
+        let outer_colour = hsv_to_color32(hue_mid, 1.0, 1.0);
+        // Single triangle from centre to outer edge.
+        painter.add(egui::Shape::convex_polygon(
+            vec![inner_p0, outer_p0, outer_p1],
+            outer_colour,
+            egui::Stroke::NONE,
+        ));
+    }
+
+    // Overlay a small grey circle at the centre to simulate S=0 (grey).
+    let grey_overlay = egui::Color32::from_rgba_unmultiplied(128, 128, 128, 180);
+    painter.circle_filled(centre, radius * 0.15, grey_overlay);
+
+    // Compute dot position from grade.hue + grade.saturation.
+    let hue_rad = (grade.hue / 360.0) * std::f32::consts::TAU;
+    let sat_norm = (grade.saturation / 100.0).clamp(0.0, 1.0);
+    let dot_pos = centre + egui::vec2(hue_rad.cos(), hue_rad.sin()) * (radius * sat_norm);
+    painter.circle_stroke(dot_pos, 5.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
+    painter.circle_stroke(dot_pos, 5.0, egui::Stroke::new(1.0, egui::Color32::BLACK));
+
+    // Handle drag.
+    if response.dragged() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let from_centre = pos - centre;
+            let dist = from_centre.length();
+            let normalised = (dist / radius).clamp(0.0, 1.0);
+            grade.saturation = normalised * 100.0;
+            let angle = from_centre.y.atan2(from_centre.x);
+            let mut hue_deg = angle.to_degrees();
+            if hue_deg < 0.0 {
+                hue_deg += 360.0;
+            }
+            grade.hue = hue_deg;
+            changed = true;
+        }
+    }
+    // Right-click to reset.
+    if response.secondary_clicked() {
+        grade.hue = 0.0;
+        grade.saturation = 0.0;
+        changed = true;
+    }
+
+    // Label below the wheel.
+    let label_pos = rect.left_bottom() + egui::vec2(5.0, -5.0);
+    painter.text(
+        label_pos,
+        egui::Align2::LEFT_BOTTOM,
+        format!("H {:.0}° S {:.0}", grade.hue, grade.saturation),
+        egui::FontId::proportional(11.0),
+        egui::Color32::WHITE,
+    );
+
+    changed
+}
+
 // ── Point Curve Widget ────────────────────────────────────────────────────────
 
 /// Interactive 200×200 point curve editor.
@@ -487,54 +595,25 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
     egui::CollapsingHeader::new("Color Grading")
         .default_open(false)
         .show(ui, |ui| {
-            // Shadows
-            egui::CollapsingHeader::new("Shadows")
-                .id_salt("cg_0")
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.label("Hue");
-                    if slider_scroll_suffix(ui, &mut edit.color_grading.shadows.hue, 0.0..=360.0, 0, "°") { changed = true; }
-                    ui.label("Saturation");
-                    if slider_scroll(ui, &mut edit.color_grading.shadows.saturation, 0.0..=100.0, 0) { changed = true; }
-                    ui.label("Luminance");
-                    if slider_scroll(ui, &mut edit.color_grading.shadows.luminance, -100.0..=100.0, 0) { changed = true; }
-                });
-            // Midtones
-            egui::CollapsingHeader::new("Midtones")
-                .id_salt("cg_1")
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.label("Hue");
-                    if slider_scroll_suffix(ui, &mut edit.color_grading.midtones.hue, 0.0..=360.0, 0, "°") { changed = true; }
-                    ui.label("Saturation");
-                    if slider_scroll(ui, &mut edit.color_grading.midtones.saturation, 0.0..=100.0, 0) { changed = true; }
-                    ui.label("Luminance");
-                    if slider_scroll(ui, &mut edit.color_grading.midtones.luminance, -100.0..=100.0, 0) { changed = true; }
-                });
-            // Highlights
-            egui::CollapsingHeader::new("Highlights")
-                .id_salt("cg_2")
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.label("Hue");
-                    if slider_scroll_suffix(ui, &mut edit.color_grading.highlights.hue, 0.0..=360.0, 0, "°") { changed = true; }
-                    ui.label("Saturation");
-                    if slider_scroll(ui, &mut edit.color_grading.highlights.saturation, 0.0..=100.0, 0) { changed = true; }
-                    ui.label("Luminance");
-                    if slider_scroll(ui, &mut edit.color_grading.highlights.luminance, -100.0..=100.0, 0) { changed = true; }
-                });
-            // Global
-            egui::CollapsingHeader::new("Global")
-                .id_salt("cg_3")
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.label("Hue");
-                    if slider_scroll_suffix(ui, &mut edit.color_grading.global.hue, 0.0..=360.0, 0, "°") { changed = true; }
-                    ui.label("Saturation");
-                    if slider_scroll(ui, &mut edit.color_grading.global.saturation, 0.0..=100.0, 0) { changed = true; }
-                    ui.label("Luminance");
-                    if slider_scroll(ui, &mut edit.color_grading.global.luminance, -100.0..=100.0, 0) { changed = true; }
-                });
+            ui.label("Shadows");
+            if color_wheel_widget(ui, &mut edit.color_grading.shadows) { changed = true; }
+            ui.label("Shadows Luminance");
+            if slider_scroll(ui, &mut edit.color_grading.shadows.luminance, -100.0..=100.0, 0) { changed = true; }
+            ui.separator();
+            ui.label("Midtones");
+            if color_wheel_widget(ui, &mut edit.color_grading.midtones) { changed = true; }
+            ui.label("Midtones Luminance");
+            if slider_scroll(ui, &mut edit.color_grading.midtones.luminance, -100.0..=100.0, 0) { changed = true; }
+            ui.separator();
+            ui.label("Highlights");
+            if color_wheel_widget(ui, &mut edit.color_grading.highlights) { changed = true; }
+            ui.label("Highlights Luminance");
+            if slider_scroll(ui, &mut edit.color_grading.highlights.luminance, -100.0..=100.0, 0) { changed = true; }
+            ui.separator();
+            ui.label("Global");
+            if color_wheel_widget(ui, &mut edit.color_grading.global) { changed = true; }
+            ui.label("Global Luminance");
+            if slider_scroll(ui, &mut edit.color_grading.global.luminance, -100.0..=100.0, 0) { changed = true; }
             ui.separator();
             ui.label("Blending");
             if slider_scroll(ui, &mut edit.color_grading.blending, 0.0..=100.0, 0) { changed = true; }
