@@ -295,12 +295,13 @@ mod windows_impl {
 
             // Second call: retrieve the actual path.
             let mut buf: Vec<u16> = vec![0u16; size as usize];
-            let ok = windows::Win32::UI::ColorSystem::GetICMProfileW(
+            // GetICMProfileW returns BOOL (Win32 type, not Result). Non-zero = success.
+            let bool_result = windows::Win32::UI::ColorSystem::GetICMProfileW(
                 hdc,
                 &mut size,
                 PWSTR(buf.as_mut_ptr()),
-            )
-            .is_ok();
+            );
+            let ok = bool_result.as_bool();
             let _ = ReleaseDC(None, hdc);
 
             if !ok {
