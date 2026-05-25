@@ -401,6 +401,8 @@ pub struct ChalkrawApp {
     /// Keyed by the absolute PNG path; cleared when the editor opens or closes so
     /// stale entries don't accumulate across sessions.
     watermark_preview_textures: HashMap<PathBuf, egui::TextureHandle>,
+    /// Guards the one-time INFO log that records which GPU adapter egui-wgpu picked.
+    gpu_adapter_logged: bool,
 }
 
 impl ChalkrawApp {
@@ -423,6 +425,7 @@ impl ChalkrawApp {
             export_dialog: None,
             watermark_editor: None,
             watermark_preview_textures: HashMap::new(),
+            gpu_adapter_logged: false,
         })
     }
 
@@ -432,6 +435,14 @@ impl ChalkrawApp {
             Some(rs) => rs,
             None => return,
         };
+        if !self.gpu_adapter_logged {
+            let info = render_state.adapter.get_info();
+            log::info!(
+                "egui canvas GPU: {} ({:?}, backend {:?}, vendor 0x{:04X})",
+                info.name, info.device_type, info.backend, info.vendor
+            );
+            self.gpu_adapter_logged = true;
+        }
         let rd = RenderDevice::from_shared(
             Arc::new(render_state.device.clone()),
             Arc::new(render_state.queue.clone()),

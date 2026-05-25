@@ -33,6 +33,11 @@ impl RenderDevice {
             })
             .await
             .map_err(|e| RenderError::NoAdapter(e.to_string()))?;
+        let info = adapter.get_info();
+        log::info!(
+            "RenderDevice selected GPU: {} ({:?}, backend {:?}, vendor 0x{:04X})",
+            info.name, info.device_type, info.backend, info.vendor
+        );
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("chalkraw render device"),
