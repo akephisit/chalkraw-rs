@@ -69,63 +69,257 @@ pub(crate) fn find_embedded_jpeg(bytes: &[u8]) -> Option<Vec<u8>> {
 
 /// Decode a RAW file via rawloader.
 ///
-/// Strategy (v1): extract the camera's embedded JPEG preview, which most
-/// modern cameras include at full resolution as a fast-load convenience.
-/// This is an 8-bit sRGB image with the camera's own tone/colour rendering
-/// baked in — it is NOT a high-bit-depth linear decode, but it is
-/// immediately viewable and editable.
-///
-/// If no usable JPEG preview is found, falls back to a half-resolution
-/// greyscale demosaic using 2×2 Bayer cell averaging.  This is intentionally
-/// crude; it ensures the function always returns *something* rather than
-/// returning an error on cameras whose RAW containers carry no preview.
+/// Priority order (Phase 4 v2):
+/// 1. Full-resolution bilinear Bayer demosaic (real RAW decode).
+/// 2. Embedded JPEG preview (fast, camera-processed, 8-bit fallback).
+/// 3. Half-resolution greyscale average (last resort).
 fn decode_raw(path: PathBuf, raw_format: chalkraw_core::RawFormat) -> Result<LinearImage, IoError> {
-    // Open the file once to give rawloader a chance to validate it, and
-    // again to read the raw bytes for JPEG scanning.
-    {
+    // Decode the RAW file with rawloader.
+    let raw = {
         let file = std::fs::File::open(&path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => IoError::NotFound(path.clone()),
             _ => IoError::Io(e),
         })?;
         let mut reader = std::io::BufReader::new(file);
-        // We attempt to decode to confirm rawloader recognises the format.
-        // If it fails we still attempt the JPEG-scan fallback below.
-        let _ = rawloader::decode(&mut reader);
+        rawloader::decode(&mut reader).ok()
+    };
+
+    // ── 1. Try real bilinear demosaic ──────────────────────────────────────
+    if let Some(ref raw_img) = raw {
+        if let Some(rgb_f32) = demosaic_bilinear(raw_img) {
+            log::info!(
+                "decode_raw {path:?}: bilinear demosaic {}x{}",
+                rgb_f32.width(),
+                rgb_f32.height()
+            );
+            return Ok(rgb_f32_to_linear_image(
+                rgb_f32,
+                chalkraw_core::ImageFormat::Raw(raw_format),
+            ));
+        }
     }
 
-    // Read the full file into memory for JPEG scanning.
-    let bytes = std::fs::read(&path)?;
+    log::info!("decode_raw {path:?}: demosaic unavailable, trying embedded JPEG preview");
 
+    // ── 2. Embedded JPEG preview fallback ─────────────────────────────────
+    let bytes = std::fs::read(&path)?;
     if let Some(jpeg_bytes) = find_embedded_jpeg(&bytes) {
-        // Decode the embedded JPEG preview.
         match decode_image_bytes(&jpeg_bytes) {
             Ok(linear) => {
+                log::info!("decode_raw {path:?}: using embedded JPEG preview");
                 return Ok(LinearImage {
                     format: chalkraw_core::ImageFormat::Raw(raw_format),
                     ..linear
                 });
             }
             Err(e) => {
-                log::warn!("embedded JPEG decode failed for {path:?}: {e}; trying rawloader demosaic");
+                log::warn!("decode_raw {path:?}: embedded JPEG decode failed: {e}");
             }
         }
     }
 
-    // No usable JPEG preview — fall back to a half-resolution demosaic via
-    // rawloader's Bayer data.
-    let file2 = std::fs::File::open(&path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => IoError::NotFound(path.clone()),
-        _ => IoError::Io(e),
-    })?;
-    let mut reader2 = std::io::BufReader::new(file2);
-    let raw = rawloader::decode(&mut reader2).map_err(|_| IoError::DecodeFailed {
-        path: path.clone(),
-        source: image::ImageError::Limits(image::error::LimitError::from_kind(
-            image::error::LimitErrorKind::DimensionError,
-        )),
-    })?;
+    // ── 3. Half-resolution greyscale demosaic (last resort) ───────────────
+    let raw_img = match raw {
+        Some(r) => r,
+        None => {
+            // rawloader failed earlier; try once more now (file may have been
+            // inaccessible the first time if it was a transient error).
+            let file = std::fs::File::open(&path).map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => IoError::NotFound(path.clone()),
+                _ => IoError::Io(e),
+            })?;
+            let mut reader = std::io::BufReader::new(file);
+            rawloader::decode(&mut reader).map_err(|_| IoError::DecodeFailed {
+                path: path.clone(),
+                source: image::ImageError::Limits(image::error::LimitError::from_kind(
+                    image::error::LimitErrorKind::DimensionError,
+                )),
+            })?
+        }
+    };
 
-    simple_half_res_demosaic(&raw, raw_format, &path)
+    simple_half_res_demosaic(&raw_img, raw_format, &path)
+}
+
+/// Full-resolution bilinear Bayer demosaic.
+///
+/// For each output pixel the known channel comes directly from the sensor;
+/// the two missing channels are interpolated by averaging all neighbours of
+/// that colour within the 3×3 window centred on the pixel.
+///
+/// Black-level subtraction and white-level normalisation are applied so the
+/// output is in the 0..1 linear-light range (sensor spectral sensitivities,
+/// not yet converted to a display colour space).
+///
+/// Camera colour-matrix transformation is applied via `cam_to_xyz_normalized`
+/// plus the standard XYZ-D65 → sRGB matrix, converting sensor values to
+/// linear sRGB. Clamping to 0..1 is applied after the matrix multiply.
+///
+/// Returns `None` if the image is monochrome, too small, or uses an
+/// unsupported (non-Bayer) CFA pattern.
+fn demosaic_bilinear(
+    raw: &rawloader::RawImage,
+) -> Option<image::ImageBuffer<image::Rgb<f32>, Vec<f32>>> {
+    use rawloader::RawImageData;
+
+    // Only handle single-component (Bayer) images.
+    if raw.cpp != 1 {
+        return None;
+    }
+    let cfa = raw.cropped_cfa();
+    if !cfa.is_valid() {
+        return None; // monochrome sensor
+    }
+
+    let w = raw.width;
+    let h = raw.height;
+    if w < 2 || h < 2 {
+        return None;
+    }
+
+    // Per-channel black level and white level for normalisation.
+    let blacks = raw.blacklevels;
+    let whites = raw.whitelevels;
+
+    // Normalise a raw integer sample to 0..1, with per-channel black subtraction.
+    let normalise_int = |v: u16, ch: usize| -> f32 {
+        let black = blacks[ch] as f32;
+        let white = whites[ch] as f32;
+        let range = (white - black).max(1.0);
+        ((v as f32 - black) / range).clamp(0.0, 1.0)
+    };
+
+    // Build the normalised sensor plane.
+    let normalised: Vec<f32> = match &raw.data {
+        RawImageData::Integer(d) => d
+            .iter()
+            .enumerate()
+            .map(|(idx, &v)| {
+                // Determine which CFA colour this pixel maps to.
+                let row = idx / w;
+                let col = idx % w;
+                let ch = cfa.color_at(row, col);
+                normalise_int(v, ch)
+            })
+            .collect(),
+        RawImageData::Float(d) => d.iter().map(|&v| v.clamp(0.0, 1.0)).collect(),
+    };
+
+    // ── Bilinear demosaic ─────────────────────────────────────────────────
+    let mut out_r = vec![0.0f32; w * h];
+    let mut out_g = vec![0.0f32; w * h];
+    let mut out_b = vec![0.0f32; w * h];
+
+    for y in 0..h {
+        for x in 0..w {
+            let center_ch = cfa.color_at(y, x);
+            let center_v = normalised[y * w + x];
+
+            let mut sum = [0.0f32; 3];
+            let mut cnt = [0u32; 3];
+
+            // Accumulate all 3×3 neighbours (including center).
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                        continue;
+                    }
+                    let nch = cfa.color_at(ny as usize, nx as usize);
+                    let nv = normalised[ny as usize * w + nx as usize];
+                    sum[nch] += nv;
+                    cnt[nch] += 1;
+                }
+            }
+
+            // The center pixel contributes its own measured value exactly.
+            // For the other two channels use the neighbourhood average.
+            let idx = y * w + x;
+            out_r[idx] = if center_ch == 0 {
+                center_v
+            } else if cnt[0] > 0 {
+                sum[0] / cnt[0] as f32
+            } else {
+                0.0
+            };
+            out_g[idx] = if center_ch == 1 {
+                center_v
+            } else if cnt[1] > 0 {
+                sum[1] / cnt[1] as f32
+            } else {
+                0.0
+            };
+            out_b[idx] = if center_ch == 2 {
+                center_v
+            } else if cnt[2] > 0 {
+                sum[2] / cnt[2] as f32
+            } else {
+                0.0
+            };
+        }
+    }
+
+    // ── Camera colour-matrix application ──────────────────────────────────
+    // `cam_to_xyz_normalized` returns a 3×4 matrix [out_xyz][in_cam_rgbe].
+    // We only use the first 3 camera channels (R, G, B) and ignore E.
+    //
+    // XYZ (D65) → linear sRGB matrix (IEC 61966-2-1):
+    //   [ 3.2406, -1.5372, -0.4986 ]
+    //   [-0.9689,  1.8758,  0.0415 ]
+    //   [ 0.0557, -0.2040,  1.0570 ]
+    let cam_to_xyz = raw.cam_to_xyz_normalized();
+    // Combine: sRGB = XYZ_to_sRGB * cam_to_xyz * cam
+    // XYZ_to_sRGB rows:
+    let xyz_to_srgb: [[f32; 3]; 3] = [
+        [3.2406, -1.5372, -0.4986],
+        [-0.9689, 1.8758, 0.0415],
+        [0.0557, -0.2040, 1.0570],
+    ];
+
+    // Pre-multiply: srgb_from_cam[srgb_ch][cam_ch] (cam_ch in 0..3 only)
+    let mut m = [[0.0f32; 3]; 3];
+    for s in 0..3 {
+        for c in 0..3 {
+            for xyz_ch in 0..3 {
+                // cam_to_xyz[xyz_ch][c] — column c of row xyz_ch
+                m[s][c] += xyz_to_srgb[s][xyz_ch] * cam_to_xyz[xyz_ch][c];
+            }
+        }
+    }
+
+    // Apply the combined matrix per pixel.
+    let mut buf = image::ImageBuffer::<image::Rgb<f32>, Vec<f32>>::new(w as u32, h as u32);
+    for y in 0..h {
+        for x in 0..w {
+            let idx = y * w + x;
+            let cr = out_r[idx];
+            let cg = out_g[idx];
+            let cb = out_b[idx];
+            let sr = (m[0][0] * cr + m[0][1] * cg + m[0][2] * cb).clamp(0.0, 1.0);
+            let sg = (m[1][0] * cr + m[1][1] * cg + m[1][2] * cb).clamp(0.0, 1.0);
+            let sb = (m[2][0] * cr + m[2][1] * cg + m[2][2] * cb).clamp(0.0, 1.0);
+            buf.put_pixel(x as u32, y as u32, image::Rgb([sr, sg, sb]));
+        }
+    }
+
+    Some(buf)
+}
+
+/// Convert an Rgb<f32> image buffer into a `LinearImage` (RGBA f32, alpha=1).
+fn rgb_f32_to_linear_image(
+    img: image::ImageBuffer<image::Rgb<f32>, Vec<f32>>,
+    format: chalkraw_core::ImageFormat,
+) -> LinearImage {
+    let (w, h) = img.dimensions();
+    let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+    for p in img.pixels() {
+        pixels.push(p[0].clamp(0.0, 1.0));
+        pixels.push(p[1].clamp(0.0, 1.0));
+        pixels.push(p[2].clamp(0.0, 1.0));
+        pixels.push(1.0);
+    }
+    LinearImage { width: w, height: h, format, pixels }
 }
 
 /// Half-resolution greyscale demosaic: average each 2×2 Bayer cell into one
