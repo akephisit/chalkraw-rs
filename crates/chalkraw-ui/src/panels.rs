@@ -26,6 +26,13 @@ fn slider_scroll(
                 *value = new_val;
                 changed = true;
             }
+            // Consume the scroll event so the right-panel ScrollArea doesn't also
+            // process it. Without this, the panel scrolls simultaneously with the
+            // slider when hovering a slider widget.
+            ui.input_mut(|i| {
+                i.smooth_scroll_delta = egui::Vec2::ZERO;
+                i.raw_scroll_delta = egui::Vec2::ZERO;
+            });
         }
     }
     changed
@@ -53,6 +60,12 @@ fn slider_scroll_suffix(
                 *value = new_val;
                 changed = true;
             }
+            // Consume the scroll event so the right-panel ScrollArea doesn't also
+            // process it.
+            ui.input_mut(|i| {
+                i.smooth_scroll_delta = egui::Vec2::ZERO;
+                i.raw_scroll_delta = egui::Vec2::ZERO;
+            });
         }
     }
     changed

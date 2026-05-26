@@ -651,9 +651,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // When the display profile is sRGB (or unavailable), fall through to the
     // standard manual sRGB encode path guarded by srgb_pad.x.
     if (edit.display_lut_pad.x == 1u) {
-        // Clamp to [0,1] before sampling — the LUT is defined on that domain.
-        let clamped = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
-        rgb = textureSample(display_lut, source_sampler, clamped).rgb;
+        // The LUT was built by qcms mapping sRGB-encoded byte values → display
+        // colour space. Its input axis represents sRGB bytes 0..255 normalised to
+        // 0..1, so we must encode linear → sRGB FIRST before sampling.
+        // Without this, linear 0.5 lands at LUT coord 0.5 = "sRGB byte 128"
+        // instead of the correct coord for linear 0.5 (≈ sRGB byte 188).
+        let srgb_in = vec3<f32>(
+            linear_to_srgb(clamp(rgb.r, 0.0, 1.0)),
+            linear_to_srgb(clamp(rgb.g, 0.0, 1.0)),
+            linear_to_srgb(clamp(rgb.b, 0.0, 1.0)),
+        );
+        rgb = textureSample(display_lut, source_sampler, srgb_in).rgb;
     } else if (edit.srgb_pad.x == 1u) {
         // Phase 0.13.2: manual sRGB encode — only when the output surface is not
         // sRGB-coded (e.g. Bgra8Unorm on Windows). Clamp first to keep pow() safe.

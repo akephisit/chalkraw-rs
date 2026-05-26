@@ -28,6 +28,10 @@ pub struct AppState {
     pub folder_filter: Option<std::path::PathBuf>,
     pub watch_folder: Option<std::path::PathBuf>,
     pub last_watch_scan: Option<std::time::Instant>,
+    /// Canvas zoom level. 1.0 = fit-to-panel. Range: 0.5..=16.0.
+    pub canvas_zoom: f32,
+    /// Canvas pan offset in screen pixels from the centred fit position.
+    pub canvas_pan: egui::Vec2,
 }
 
 impl AppState {
@@ -79,6 +83,8 @@ impl AppState {
             folder_filter: None,
             watch_folder: None,
             last_watch_scan: None,
+            canvas_zoom: 1.0,
+            canvas_pan: egui::Vec2::ZERO,
         })
     }
 
@@ -108,6 +114,8 @@ impl AppState {
         self.current_flag = photo.flag;
         self.edit = edit;
         self.dirty_since = None;
+        self.canvas_zoom = 1.0;
+        self.canvas_pan = egui::Vec2::ZERO;
         Ok(())
     }
 
@@ -838,24 +846,57 @@ impl eframe::App for ChalkrawApp {
                     gpu.run_blurs(16.0, self.state.edit.detail.sharpening.radius, 5.0, nr_amount);
                     self.state.mark_dirty();
                 }
-                // Issue 2: letterbox — preserve image aspect ratio rather than
-                // stretching to fill the entire central panel.
+
+                // Compute fit dimensions (letterbox — preserves image aspect ratio).
                 let available = ui.available_size();
                 let img_aspect = image_w as f32 / image_h as f32;
                 let avail_aspect = available.x / available.y;
-                let (rect_w, rect_h) = if img_aspect >= avail_aspect {
+                let (fit_w, fit_h) = if img_aspect >= avail_aspect {
                     // Image wider than panel — fit width, letterbox top/bottom.
                     (available.x, available.x / img_aspect)
                 } else {
                     // Image taller than panel — fit height, letterbox left/right.
                     (available.y * img_aspect, available.y)
                 };
-                let (full_rect, _) =
-                    ui.allocate_exact_size(available, egui::Sense::drag());
+
+                // Apply zoom to the fitted dimensions.
+                let zoom = self.state.canvas_zoom;
+                let zoomed_w = fit_w * zoom;
+                let zoomed_h = fit_h * zoom;
+
+                // Allocate the full panel area; canvas interactions come from this response.
+                let (full_rect, response) =
+                    ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+
+                // Handle mouse-wheel zoom (only when pointer is over the canvas).
+                if response.hovered() {
+                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                    if scroll.abs() > 0.0 {
+                        // Each scroll unit zooms 10% in or out.
+                        let zoom_step = 1.0 + scroll.signum() * 0.1;
+                        self.state.canvas_zoom =
+                            (self.state.canvas_zoom * zoom_step).clamp(0.5, 16.0);
+                    }
+                }
+
+                // Handle drag-pan (meaningful only when zoomed in past fit).
+                if response.dragged() && self.state.canvas_zoom > 1.0 {
+                    self.state.canvas_pan += response.drag_delta();
+                }
+
+                // Double-click resets zoom and pan.
+                if response.double_clicked() {
+                    self.state.canvas_zoom = 1.0;
+                    self.state.canvas_pan = egui::Vec2::ZERO;
+                }
+
+                // Position the image rect centred in the panel, offset by pan.
+                let centre = full_rect.center() + self.state.canvas_pan;
                 let image_rect = egui::Rect::from_center_size(
-                    full_rect.center(),
-                    egui::vec2(rect_w, rect_h),
+                    centre,
+                    egui::vec2(zoomed_w, zoomed_h),
                 );
+
                 ui.painter().add(egui::Shape::Callback(
                     egui_wgpu::Callback::new_paint_callback(
                         image_rect,
