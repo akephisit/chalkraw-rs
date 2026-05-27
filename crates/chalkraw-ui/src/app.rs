@@ -868,23 +868,44 @@ impl eframe::App for ChalkrawApp {
                 let (full_rect, response) =
                     ui.allocate_exact_size(available, egui::Sense::click_and_drag());
 
-                // Handle mouse-wheel zoom (only when pointer is over the canvas).
-                if response.hovered() {
-                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                    if scroll.abs() > 0.0 {
-                        // Each scroll unit zooms 10% in or out.
-                        let zoom_step = 1.0 + scroll.signum() * 0.1;
-                        self.state.canvas_zoom =
-                            (self.state.canvas_zoom * zoom_step).clamp(0.5, 16.0);
+                // Phase 5C/canvas zoom (Ctrl + mouse wheel).
+                let (scroll_y, ctrl_held, pointer_over_canvas) = ctx.input(|i| {
+                    (
+                        i.smooth_scroll_delta.y,
+                        i.modifiers.ctrl,
+                        i.pointer.hover_pos().map(|p| full_rect.contains(p)).unwrap_or(false),
+                    )
+                });
+                if scroll_y.abs() > 0.0 && pointer_over_canvas {
+                    log::debug!("canvas scroll: y={scroll_y:.2}, ctrl={ctrl_held}");
+                }
+                if pointer_over_canvas && ctrl_held && scroll_y.abs() > 0.0 {
+                    // Anchor zoom around the mouse pointer for natural feel.
+                    let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
+                    let old_zoom = self.state.canvas_zoom;
+                    let zoom_step = if scroll_y > 0.0 { 1.1_f32 } else { 1.0 / 1.1 };
+                    let new_zoom = (old_zoom * zoom_step).clamp(0.25, 16.0);
+                    if let Some(p) = pointer_pos {
+                        // Translate canvas_pan so the pointed-at image pixel stays under the cursor.
+                        let from_centre = p - full_rect.center() - self.state.canvas_pan;
+                        let scale_change = new_zoom / old_zoom;
+                        let new_from_centre = from_centre * scale_change;
+                        self.state.canvas_pan += from_centre - new_from_centre;
                     }
+                    self.state.canvas_zoom = new_zoom;
+                    // Consume the event so the right-panel ScrollArea doesn't also see it.
+                    ctx.input_mut(|i| {
+                        i.smooth_scroll_delta = egui::Vec2::ZERO;
+                        i.raw_scroll_delta = egui::Vec2::ZERO;
+                    });
                 }
 
-                // Handle drag-pan (meaningful only when zoomed in past fit).
-                if response.dragged() && self.state.canvas_zoom > 1.0 {
+                // Drag-pan when zoomed in (any zoom level, including <1.0).
+                if response.dragged() && response.drag_delta().length() > 0.5 {
                     self.state.canvas_pan += response.drag_delta();
                 }
 
-                // Double-click resets zoom and pan.
+                // Double-click resets zoom + pan.
                 if response.double_clicked() {
                     self.state.canvas_zoom = 1.0;
                     self.state.canvas_pan = egui::Vec2::ZERO;
