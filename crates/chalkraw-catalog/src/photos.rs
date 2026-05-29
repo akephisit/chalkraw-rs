@@ -15,10 +15,28 @@ impl Catalog {
         Ok(())
     }
 
+    pub fn insert_photos(&self, photos: &[Photo]) -> Result<(), CatalogError> {
+        if photos.is_empty() {
+            return Ok(());
+        }
+        let write = self.db().begin_write()?;
+        {
+            let mut tbl = write.open_table(PHOTOS_TABLE)?;
+            for photo in photos {
+                let bytes = bincode::serialize(photo)?;
+                tbl.insert(photo.id.as_bytes(), bytes.as_slice())?;
+            }
+        }
+        write.commit()?;
+        Ok(())
+    }
+
     pub fn get_photo(&self, id: PhotoId) -> Result<Photo, CatalogError> {
         let read = self.db().begin_read()?;
         let tbl = read.open_table(PHOTOS_TABLE)?;
-        let v = tbl.get(id.as_bytes())?.ok_or(CatalogError::PhotoNotFound(id))?;
+        let v = tbl
+            .get(id.as_bytes())?
+            .ok_or(CatalogError::PhotoNotFound(id))?;
         Ok(bincode::deserialize(v.value())?)
     }
 
@@ -71,7 +89,13 @@ mod tests {
     #[test]
     fn insert_then_get_returns_same_photo() {
         let (_dir, cat) = cat();
-        let p = Photo::new(PathBuf::from("/x/a.jpg"), [0u8; 32], 100, 100, ImageFormat::Jpeg);
+        let p = Photo::new(
+            PathBuf::from("/x/a.jpg"),
+            [0u8; 32],
+            100,
+            100,
+            ImageFormat::Jpeg,
+        );
         cat.insert_photo(&p).unwrap();
         let back = cat.get_photo(p.id).unwrap();
         assert_eq!(p, back);
@@ -80,7 +104,13 @@ mod tests {
     #[test]
     fn list_returns_all_inserted() {
         let (_dir, cat) = cat();
-        let p1 = Photo::new(PathBuf::from("/x/a.jpg"), [0u8; 32], 1, 1, ImageFormat::Jpeg);
+        let p1 = Photo::new(
+            PathBuf::from("/x/a.jpg"),
+            [0u8; 32],
+            1,
+            1,
+            ImageFormat::Jpeg,
+        );
         let p2 = Photo::new(PathBuf::from("/x/b.jpg"), [1u8; 32], 2, 2, ImageFormat::Png);
         cat.insert_photo(&p1).unwrap();
         cat.insert_photo(&p2).unwrap();
@@ -91,7 +121,13 @@ mod tests {
     #[test]
     fn find_photo_by_hash_returns_inserted() {
         let (_dir, cat) = cat();
-        let mut p = Photo::new(PathBuf::from("/x/a.jpg"), [0u8; 32], 1, 1, ImageFormat::Jpeg);
+        let mut p = Photo::new(
+            PathBuf::from("/x/a.jpg"),
+            [0u8; 32],
+            1,
+            1,
+            ImageFormat::Jpeg,
+        );
         p.file_hash = [7u8; 32];
         cat.insert_photo(&p).unwrap();
         let found = cat.find_photo_by_hash(&[7u8; 32]).unwrap();
@@ -103,7 +139,13 @@ mod tests {
     #[test]
     fn update_flag_round_trips() {
         let (_dir, cat) = cat();
-        let p = Photo::new(PathBuf::from("/x/a.jpg"), [0u8; 32], 1, 1, ImageFormat::Jpeg);
+        let p = Photo::new(
+            PathBuf::from("/x/a.jpg"),
+            [0u8; 32],
+            1,
+            1,
+            ImageFormat::Jpeg,
+        );
         cat.insert_photo(&p).unwrap();
         cat.update_flag(p.id, Flag::Pick).unwrap();
         assert_eq!(cat.get_photo(p.id).unwrap().flag, Flag::Pick);
@@ -116,11 +158,35 @@ mod tests {
     #[test]
     fn insert_then_list_preserves_thumbnail() {
         let (_dir, cat) = cat();
-        let mut p = Photo::new(PathBuf::from("/x/a.jpg"), [0u8; 32], 1, 1, ImageFormat::Jpeg);
+        let mut p = Photo::new(
+            PathBuf::from("/x/a.jpg"),
+            [0u8; 32],
+            1,
+            1,
+            ImageFormat::Jpeg,
+        );
         p.thumbnail = vec![1, 2, 3, 4, 5];
         cat.insert_photo(&p).unwrap();
         let listed = cat.list_photos().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].thumbnail, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn insert_photos_writes_all_in_one_call() {
+        let (_dir, cat) = cat();
+        let p1 = Photo::new(
+            PathBuf::from("/x/a.jpg"),
+            [1u8; 32],
+            1,
+            1,
+            ImageFormat::Jpeg,
+        );
+        let p2 = Photo::new(PathBuf::from("/x/b.png"), [2u8; 32], 2, 2, ImageFormat::Png);
+        cat.insert_photos(&[p1.clone(), p2.clone()]).unwrap();
+        let listed = cat.list_photos().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.contains(&p1));
+        assert!(listed.contains(&p2));
     }
 }

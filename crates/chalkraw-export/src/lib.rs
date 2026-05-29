@@ -5,8 +5,8 @@ pub mod text;
 use chalkraw_core::EditState;
 use chalkraw_io::LinearImage;
 use chalkraw_render::{
-    make_target, make_tone_curve_lut, make_identity_3d_lut, read_to_cpu, BilateralPipeline,
-    BlurPipeline, create_pingpong, DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice,
+    create_pingpong, make_identity_3d_lut, make_target, make_tone_curve_lut, read_to_cpu,
+    BilateralPipeline, BlurPipeline, DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice,
     SourceTexture,
 };
 use std::path::{Path, PathBuf};
@@ -105,6 +105,35 @@ pub enum ExportError {
     Decode(#[from] chalkraw_io::IoError),
 }
 
+struct ExportContext {
+    pipeline: DevelopPipeline,
+    blur: BlurPipeline,
+    bilat: BilateralPipeline,
+    _display_lut_tex: wgpu::Texture,
+    display_lut_view: wgpu::TextureView,
+}
+
+impl ExportContext {
+    fn new(rd: &RenderDevice) -> Self {
+        let pipeline = DevelopPipeline::new(
+            rd,
+            PipelineConfig {
+                output_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            },
+        );
+        let blur = BlurPipeline::new(rd);
+        let bilat = BilateralPipeline::new(rd);
+        let (_display_lut_tex, display_lut_view) = make_identity_3d_lut(rd);
+        Self {
+            pipeline,
+            blur,
+            bilat,
+            _display_lut_tex,
+            display_lut_view,
+        }
+    }
+}
+
 // ── Single-photo export ───────────────────────────────────────────────────────
 
 /// Render the current photo with the given edits and save to `output_path`.
@@ -118,10 +147,17 @@ pub fn export_current(
     let (out_w, out_h) = compute_output_size(image.width, image.height, options.resize);
 
     let source = SourceTexture::upload(rd, image.width, image.height, &image.pixels);
-    let mut pipeline = DevelopPipeline::new(rd, PipelineConfig {
-        output_format: wgpu::TextureFormat::Rgba8UnormSrgb,
-    });
-    pipeline.set_atmospheric_light(chalkraw_render::source::estimate_atmospheric_light(&image.pixels, image.width, image.height));
+    let mut pipeline = DevelopPipeline::new(
+        rd,
+        PipelineConfig {
+            output_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        },
+    );
+    pipeline.set_atmospheric_light(chalkraw_render::source::estimate_atmospheric_light(
+        &image.pixels,
+        image.width,
+        image.height,
+    ));
     pipeline.update_uniforms(&EditUniforms::from(edit));
 
     // Run the Phase 2E blur passes and bilateral NR. These mirror what the UI canvas does
@@ -135,13 +171,56 @@ pub fn export_current(
     let (_, _nr_a, _, nr_b) = create_pingpong(rd, image.width, image.height);
 
     let sharp_sigma = edit.detail.sharpening.radius.max(0.5);
-    blur.render_pass(&source.view, &clarity_a,  image.width, image.height, true,  16.0);
-    blur.render_pass(&clarity_a,   &clarity_b,  image.width, image.height, false, 16.0);
-    blur.render_pass(&source.view, &sharp_a,    image.width, image.height, true,  sharp_sigma);
-    blur.render_pass(&sharp_a,     &sharp_b,    image.width, image.height, false, sharp_sigma);
-    blur.render_pass(&source.view, &texture_a,  image.width, image.height, true,  5.0);
-    blur.render_pass(&texture_a,   &texture_b,  image.width, image.height, false, 5.0);
-    let nr_amount = (edit.detail.noise_reduction.luminance + edit.detail.noise_reduction.color) / 2.0;
+    blur.render_pass(
+        &source.view,
+        &clarity_a,
+        image.width,
+        image.height,
+        true,
+        16.0,
+    );
+    blur.render_pass(
+        &clarity_a,
+        &clarity_b,
+        image.width,
+        image.height,
+        false,
+        16.0,
+    );
+    blur.render_pass(
+        &source.view,
+        &sharp_a,
+        image.width,
+        image.height,
+        true,
+        sharp_sigma,
+    );
+    blur.render_pass(
+        &sharp_a,
+        &sharp_b,
+        image.width,
+        image.height,
+        false,
+        sharp_sigma,
+    );
+    blur.render_pass(
+        &source.view,
+        &texture_a,
+        image.width,
+        image.height,
+        true,
+        5.0,
+    );
+    blur.render_pass(
+        &texture_a,
+        &texture_b,
+        image.width,
+        image.height,
+        false,
+        5.0,
+    );
+    let nr_amount =
+        (edit.detail.noise_reduction.luminance + edit.detail.noise_reduction.color) / 2.0;
     let sigma_range = 0.01 + (nr_amount / 100.0) * 0.2;
     bilat.render_pass(&source.view, &nr_b, 2.0, sigma_range, 3.0);
 
@@ -149,7 +228,9 @@ pub fn export_current(
     // Export always uses an identity display LUT (no monitor ICC transform needed for file export).
     let (_lut_tex, lut_view) = make_tone_curve_lut(rd, &edit.tone_curve.rgb.0);
     let (_dlut_tex, dlut_view) = make_identity_3d_lut(rd);
-    let bind_group = pipeline.make_bind_group(&source, &clarity_b, &sharp_b, &texture_b, &nr_b, &lut_view, &dlut_view);
+    let bind_group = pipeline.make_bind_group(
+        &source, &clarity_b, &sharp_b, &texture_b, &nr_b, &lut_view, &dlut_view,
+    );
 
     let (target, view) = make_target(rd, out_w, out_h);
     pipeline.render(&view, &bind_group);
@@ -173,11 +254,16 @@ pub fn export_batch(
 ) -> Vec<BatchItemResult> {
     let mut results = Vec::with_capacity(items.len());
     let total = items.len();
+    let mut ctx = ExportContext::new(rd);
     for (idx, item) in items.iter().enumerate() {
         on_progress(idx + 1, total, &item.original_name);
-        let output_path =
-            compose_output_path(&opts.output_dir, &opts.name_pattern, &item.original_name, opts.format);
-        let result = export_single_item(rd, item, opts, &output_path);
+        let output_path = compose_output_path(
+            &opts.output_dir,
+            &opts.name_pattern,
+            &item.original_name,
+            opts.format,
+        );
+        let result = export_single_item(rd, &mut ctx, item, opts, &output_path);
         match result {
             Ok(()) => results.push(BatchItemResult {
                 source_path: item.source_path.clone(),
@@ -214,6 +300,7 @@ fn compose_output_path(dir: &Path, pattern: &str, name: &str, format: ExportForm
 
 fn export_single_item(
     rd: &RenderDevice,
+    ctx: &mut ExportContext,
     item: &BatchItem,
     opts: &BatchOptions,
     output_path: &Path,
@@ -222,40 +309,92 @@ fn export_single_item(
     let (out_w, out_h) = compute_output_size(image.width, image.height, opts.resize);
 
     let source = SourceTexture::upload(rd, image.width, image.height, &image.pixels);
-    let mut pipeline = DevelopPipeline::new(rd, PipelineConfig {
-        output_format: wgpu::TextureFormat::Rgba8UnormSrgb,
-    });
-    pipeline.set_atmospheric_light(chalkraw_render::source::estimate_atmospheric_light(&image.pixels, image.width, image.height));
-    pipeline.update_uniforms(&EditUniforms::from(&item.edit));
+    ctx.pipeline
+        .set_atmospheric_light(chalkraw_render::source::estimate_atmospheric_light(
+            &image.pixels,
+            image.width,
+            image.height,
+        ));
+    ctx.pipeline
+        .update_uniforms(&EditUniforms::from(&item.edit));
 
     // Run Phase 2E blur passes and bilateral NR so Clarity, Texture, Sharpening, NR,
     // and Dehaze are correctly applied in the exported file. See export_current for rationale.
-    let blur = BlurPipeline::new(rd);
-    let bilat = BilateralPipeline::new(rd);
     let (_, clarity_a, _, clarity_b) = create_pingpong(rd, image.width, image.height);
     let (_, sharp_a, _, sharp_b) = create_pingpong(rd, image.width, image.height);
     let (_, texture_a, _, texture_b) = create_pingpong(rd, image.width, image.height);
     let (_, _nr_a, _, nr_b) = create_pingpong(rd, image.width, image.height);
 
     let sharp_sigma = item.edit.detail.sharpening.radius.max(0.5);
-    blur.render_pass(&source.view, &clarity_a,  image.width, image.height, true,  16.0);
-    blur.render_pass(&clarity_a,   &clarity_b,  image.width, image.height, false, 16.0);
-    blur.render_pass(&source.view, &sharp_a,    image.width, image.height, true,  sharp_sigma);
-    blur.render_pass(&sharp_a,     &sharp_b,    image.width, image.height, false, sharp_sigma);
-    blur.render_pass(&source.view, &texture_a,  image.width, image.height, true,  5.0);
-    blur.render_pass(&texture_a,   &texture_b,  image.width, image.height, false, 5.0);
-    let nr_amount = (item.edit.detail.noise_reduction.luminance + item.edit.detail.noise_reduction.color) / 2.0;
+    ctx.blur.render_pass(
+        &source.view,
+        &clarity_a,
+        image.width,
+        image.height,
+        true,
+        16.0,
+    );
+    ctx.blur.render_pass(
+        &clarity_a,
+        &clarity_b,
+        image.width,
+        image.height,
+        false,
+        16.0,
+    );
+    ctx.blur.render_pass(
+        &source.view,
+        &sharp_a,
+        image.width,
+        image.height,
+        true,
+        sharp_sigma,
+    );
+    ctx.blur.render_pass(
+        &sharp_a,
+        &sharp_b,
+        image.width,
+        image.height,
+        false,
+        sharp_sigma,
+    );
+    ctx.blur.render_pass(
+        &source.view,
+        &texture_a,
+        image.width,
+        image.height,
+        true,
+        5.0,
+    );
+    ctx.blur.render_pass(
+        &texture_a,
+        &texture_b,
+        image.width,
+        image.height,
+        false,
+        5.0,
+    );
+    let nr_amount =
+        (item.edit.detail.noise_reduction.luminance + item.edit.detail.noise_reduction.color) / 2.0;
     let sigma_range = 0.01 + (nr_amount / 100.0) * 0.2;
-    bilat.render_pass(&source.view, &nr_b, 2.0, sigma_range, 3.0);
+    ctx.bilat
+        .render_pass(&source.view, &nr_b, 2.0, sigma_range, 3.0);
 
     // Build the tone-curve LUT from the current edit's point curve.
     // Export always uses an identity display LUT (no monitor ICC transform needed for file export).
     let (_lut_tex, lut_view) = make_tone_curve_lut(rd, &item.edit.tone_curve.rgb.0);
-    let (_dlut_tex, dlut_view) = make_identity_3d_lut(rd);
-    let bind_group = pipeline.make_bind_group(&source, &clarity_b, &sharp_b, &texture_b, &nr_b, &lut_view, &dlut_view);
+    let bind_group = ctx.pipeline.make_bind_group(
+        &source,
+        &clarity_b,
+        &sharp_b,
+        &texture_b,
+        &nr_b,
+        &lut_view,
+        &ctx.display_lut_view,
+    );
 
     let (target, view) = make_target(rd, out_w, out_h);
-    pipeline.render(&view, &bind_group);
+    ctx.pipeline.render(&view, &bind_group);
     let mut pixels_rgba = read_to_cpu(rd, &target, out_w, out_h)?;
 
     if let Some(ref preset) = opts.watermark_preset {
@@ -326,30 +465,28 @@ fn apply_text_layer(
     let margin = (layer.margin_pct / 100.0 * long_edge).round() as i64;
     let (anchor_x, anchor_y) = match layer.anchor {
         chalkraw_core::WatermarkAnchor::TopLeft => (margin, margin),
-        chalkraw_core::WatermarkAnchor::TopCenter => {
-            ((base_w as i64 - new_w as i64) / 2, margin)
-        }
-        chalkraw_core::WatermarkAnchor::TopRight => {
-            (base_w as i64 - new_w as i64 - margin, margin)
-        }
-        chalkraw_core::WatermarkAnchor::CenterLeft => {
-            (margin, (base_h as i64 - new_h as i64) / 2)
-        }
-        chalkraw_core::WatermarkAnchor::Center => {
-            ((base_w as i64 - new_w as i64) / 2, (base_h as i64 - new_h as i64) / 2)
-        }
-        chalkraw_core::WatermarkAnchor::CenterRight => {
-            (base_w as i64 - new_w as i64 - margin, (base_h as i64 - new_h as i64) / 2)
-        }
+        chalkraw_core::WatermarkAnchor::TopCenter => ((base_w as i64 - new_w as i64) / 2, margin),
+        chalkraw_core::WatermarkAnchor::TopRight => (base_w as i64 - new_w as i64 - margin, margin),
+        chalkraw_core::WatermarkAnchor::CenterLeft => (margin, (base_h as i64 - new_h as i64) / 2),
+        chalkraw_core::WatermarkAnchor::Center => (
+            (base_w as i64 - new_w as i64) / 2,
+            (base_h as i64 - new_h as i64) / 2,
+        ),
+        chalkraw_core::WatermarkAnchor::CenterRight => (
+            base_w as i64 - new_w as i64 - margin,
+            (base_h as i64 - new_h as i64) / 2,
+        ),
         chalkraw_core::WatermarkAnchor::BottomLeft => {
             (margin, base_h as i64 - new_h as i64 - margin)
         }
-        chalkraw_core::WatermarkAnchor::BottomCenter => {
-            ((base_w as i64 - new_w as i64) / 2, base_h as i64 - new_h as i64 - margin)
-        }
-        chalkraw_core::WatermarkAnchor::BottomRight => {
-            (base_w as i64 - new_w as i64 - margin, base_h as i64 - new_h as i64 - margin)
-        }
+        chalkraw_core::WatermarkAnchor::BottomCenter => (
+            (base_w as i64 - new_w as i64) / 2,
+            base_h as i64 - new_h as i64 - margin,
+        ),
+        chalkraw_core::WatermarkAnchor::BottomRight => (
+            base_w as i64 - new_w as i64 - margin,
+            base_h as i64 - new_h as i64 - margin,
+        ),
     };
     let global_alpha = layer.opacity.clamp(0.0, 1.0);
     for wy in 0..new_h {
@@ -406,8 +543,7 @@ fn apply_watermark(
     let scale = target_long as f32 / (orig_w.max(orig_h) as f32);
     let new_w = ((orig_w as f32) * scale).max(1.0) as u32;
     let new_h = ((orig_h as f32) * scale).max(1.0) as u32;
-    let resized =
-        image::imageops::resize(&wm, new_w, new_h, image::imageops::FilterType::Triangle);
+    let resized = image::imageops::resize(&wm, new_w, new_h, image::imageops::FilterType::Triangle);
 
     // Apply rotation BEFORE positioning; re-read dimensions in case 90°/270° swaps them.
     let resized = if stamp.rotation_deg.abs() > 0.1 {
@@ -423,19 +559,23 @@ fn apply_watermark(
         WatermarkAnchor::TopCenter => ((base_w as i64 - new_w as i64) / 2, margin),
         WatermarkAnchor::TopRight => (base_w as i64 - new_w as i64 - margin, margin),
         WatermarkAnchor::CenterLeft => (margin, (base_h as i64 - new_h as i64) / 2),
-        WatermarkAnchor::Center => {
-            ((base_w as i64 - new_w as i64) / 2, (base_h as i64 - new_h as i64) / 2)
-        }
-        WatermarkAnchor::CenterRight => {
-            (base_w as i64 - new_w as i64 - margin, (base_h as i64 - new_h as i64) / 2)
-        }
+        WatermarkAnchor::Center => (
+            (base_w as i64 - new_w as i64) / 2,
+            (base_h as i64 - new_h as i64) / 2,
+        ),
+        WatermarkAnchor::CenterRight => (
+            base_w as i64 - new_w as i64 - margin,
+            (base_h as i64 - new_h as i64) / 2,
+        ),
         WatermarkAnchor::BottomLeft => (margin, base_h as i64 - new_h as i64 - margin),
-        WatermarkAnchor::BottomCenter => {
-            ((base_w as i64 - new_w as i64) / 2, base_h as i64 - new_h as i64 - margin)
-        }
-        WatermarkAnchor::BottomRight => {
-            (base_w as i64 - new_w as i64 - margin, base_h as i64 - new_h as i64 - margin)
-        }
+        WatermarkAnchor::BottomCenter => (
+            (base_w as i64 - new_w as i64) / 2,
+            base_h as i64 - new_h as i64 - margin,
+        ),
+        WatermarkAnchor::BottomRight => (
+            base_w as i64 - new_w as i64 - margin,
+            base_h as i64 - new_h as i64 - margin,
+        ),
     };
 
     let global_alpha = stamp.opacity.clamp(0.0, 1.0);
@@ -472,7 +612,9 @@ fn apply_watermark(
 /// expands the canvas to the rotated bounding box and leaves transparent pixels
 /// where the original had no coverage.
 pub fn rotate_image(img: &image::RgbaImage, angle_deg: f32) -> image::RgbaImage {
-    if angle_deg.abs() < 0.1 { return img.clone(); }
+    if angle_deg.abs() < 0.1 {
+        return img.clone();
+    }
     let snapped = ((angle_deg / 90.0).round() as i32).rem_euclid(4);
     // Snap to 90° if the requested angle is close enough — avoids unnecessary
     // bilinear sampling for the common axis-aligned case.
@@ -494,20 +636,30 @@ pub fn rotate_image(img: &image::RgbaImage, angle_deg: f32) -> image::RgbaImage 
     // Bounding box of the rotated image.
     let (cx, cy) = (w as f32 * 0.5, h as f32 * 0.5);
     let corners = [
-        ( 0.0 - cx,  0.0 - cy),
+        (0.0 - cx, 0.0 - cy),
         (w as f32 - cx, 0.0 - cy),
-        ( 0.0 - cx, h as f32 - cy),
+        (0.0 - cx, h as f32 - cy),
         (w as f32 - cx, h as f32 - cy),
     ];
-    let mut min_x = f32::MAX; let mut min_y = f32::MAX;
-    let mut max_x = f32::MIN; let mut max_y = f32::MIN;
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
     for (x, y) in corners {
         let rx = x * cos_t - y * sin_t;
         let ry = x * sin_t + y * cos_t;
-        if rx < min_x { min_x = rx; }
-        if ry < min_y { min_y = ry; }
-        if rx > max_x { max_x = rx; }
-        if ry > max_y { max_y = ry; }
+        if rx < min_x {
+            min_x = rx;
+        }
+        if ry < min_y {
+            min_y = ry;
+        }
+        if rx > max_x {
+            max_x = rx;
+        }
+        if ry > max_y {
+            max_y = ry;
+        }
     }
     let out_w = (max_x - min_x).ceil() as u32;
     let out_h = (max_y - min_y).ceil() as u32;
@@ -520,7 +672,9 @@ pub fn rotate_image(img: &image::RgbaImage, angle_deg: f32) -> image::RgbaImage 
             let cy2 = oy as f32 + min_y;
             let sx = cx2 * cos_t + cy2 * sin_t + cx;
             let sy = -cx2 * sin_t + cy2 * cos_t + cy;
-            if sx < 0.0 || sy < 0.0 || sx >= (w - 1) as f32 || sy >= (h - 1) as f32 { continue; }
+            if sx < 0.0 || sy < 0.0 || sx >= (w - 1) as f32 || sy >= (h - 1) as f32 {
+                continue;
+            }
             // Bilinear sample.
             let x0 = sx.floor() as u32;
             let y0 = sy.floor() as u32;
@@ -538,9 +692,16 @@ pub fn rotate_image(img: &image::RgbaImage, angle_deg: f32) -> image::RgbaImage 
                 let bot = p01[c] as f32 * (1.0 - fx) + p11[c] as f32 * fx;
                 blended[c] = top * (1.0 - fy) + bot * fy;
             }
-            out.put_pixel(ox, oy, image::Rgba([
-                blended[0] as u8, blended[1] as u8, blended[2] as u8, blended[3] as u8,
-            ]));
+            out.put_pixel(
+                ox,
+                oy,
+                image::Rgba([
+                    blended[0] as u8,
+                    blended[1] as u8,
+                    blended[2] as u8,
+                    blended[3] as u8,
+                ]),
+            );
         }
     }
     out
@@ -608,7 +769,10 @@ mod tests {
 
     #[test]
     fn compute_output_size_original() {
-        assert_eq!(compute_output_size(1024, 768, ExportResize::Original), (1024, 768));
+        assert_eq!(
+            compute_output_size(1024, 768, ExportResize::Original),
+            (1024, 768)
+        );
     }
 
     #[test]
@@ -635,7 +799,12 @@ mod tests {
     fn compose_output_path_substitutes_tokens() {
         use std::path::PathBuf;
         let dir = PathBuf::from("/tmp/out");
-        let p = compose_output_path(&dir, "{name}_edited", "myphoto", ExportFormat::Jpeg { quality: 80 });
+        let p = compose_output_path(
+            &dir,
+            "{name}_edited",
+            "myphoto",
+            ExportFormat::Jpeg { quality: 80 },
+        );
         let name = p.file_name().unwrap().to_string_lossy();
         assert!(name.starts_with("myphoto_edited"), "got: {name}");
         assert!(name.ends_with(".jpg"), "got: {name}");
@@ -653,7 +822,11 @@ mod tests {
 
     #[test]
     fn rotate_image_45_produces_larger_bounding_box() {
-        let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(10, 10, image::Rgba([255, 255, 255, 255]));
+        let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(
+            10,
+            10,
+            image::Rgba([255, 255, 255, 255]),
+        );
         let rotated = super::rotate_image(&img, 45.0);
         let (w, h) = rotated.dimensions();
         // sqrt(2) * 10 ≈ 14.14

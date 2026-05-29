@@ -1,10 +1,10 @@
 use crate::canvas::{CanvasCallback, CanvasGpu};
-use crate::panels::{left_panel, right_panel};
+use crate::panels::{left_panel, right_panel, EditChange};
 use chalkraw_catalog::Catalog;
 use chalkraw_core::{EditState, Flag, ImageFormat, Photo, PhotoId};
 use chalkraw_io::{decode_image, decode_image_bytes, LinearImage};
 use chalkraw_render::RenderDevice;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -23,6 +23,8 @@ pub struct AppState {
     pub photo_id: PhotoId,
     pub current_flag: Flag,
     pub catalog: Catalog,
+    pub photos_cache: Vec<Photo>,
+    pub photo_hashes: HashSet<[u8; 32]>,
     pub dirty_since: Option<Instant>,
     pub new_preset_name: String,
     pub folder_filter: Option<std::path::PathBuf>,
@@ -38,8 +40,8 @@ impl AppState {
     pub fn bootstrap(fixture: PathBuf, catalog_path: PathBuf) -> anyhow::Result<Self> {
         let (image, file_bytes, photo_path) = if fixture.exists() {
             let bytes = std::fs::read(&fixture)?;
-            let img = decode_image(&fixture)
-                .map_err(|e| anyhow::anyhow!("decode {fixture:?}: {e}"))?;
+            let img =
+                decode_image(&fixture).map_err(|e| anyhow::anyhow!("decode {fixture:?}: {e}"))?;
             (img, bytes, fixture.clone())
         } else {
             log::warn!("fixture {fixture:?} not found; loading embedded sample image");
@@ -66,11 +68,19 @@ impl AppState {
         } else {
             let hash = *blake3::hash(&file_bytes).as_bytes();
             let thumb = chalkraw_io::make_thumbnail(&image).unwrap_or_default();
-            let mut p = Photo::new(photo_path, hash, image.width, image.height, ImageFormat::Jpeg);
+            let mut p = Photo::new(
+                photo_path,
+                hash,
+                image.width,
+                image.height,
+                ImageFormat::Jpeg,
+            );
             p.thumbnail = thumb;
             catalog.insert_photo(&p)?;
             (p, EditState::default())
         };
+        let photos_cache = catalog.list_photos()?;
+        let photo_hashes = photos_cache.iter().map(|p| p.file_hash).collect();
 
         Ok(Self {
             edit,
@@ -78,6 +88,8 @@ impl AppState {
             photo_id: photo.id,
             current_flag: photo.flag,
             catalog,
+            photos_cache,
+            photo_hashes,
             dirty_since: None,
             new_preset_name: String::new(),
             folder_filter: None,
@@ -93,18 +105,25 @@ impl AppState {
         self.flush_if_due();
 
         let bytes = std::fs::read(&path)?;
-        let image = decode_image(&path)
+        let image = chalkraw_io::decode_image_from_bytes(&path, &bytes)
             .map_err(|e| anyhow::anyhow!("decode {path:?}: {e}"))?;
         let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
 
-        let (photo, edit) = match self.catalog.find_photo_by_hash(&hash)? {
+        let (photo, edit) = match self
+            .photos_cache
+            .iter()
+            .find(|p| p.file_hash == hash)
+            .cloned()
+        {
             Some(p) => {
                 let e = self.catalog.get_edit(p.id)?;
                 (p, e)
             }
             None => {
-                let p = Photo::new(path.clone(), hash, image.width, image.height, ImageFormat::Jpeg);
+                let p = Photo::new(path.clone(), hash, image.width, image.height, image.format);
                 self.catalog.insert_photo(&p)?;
+                self.photos_cache.push(p.clone());
+                self.photo_hashes.insert(hash);
                 (p, EditState::default())
             }
         };
@@ -119,34 +138,21 @@ impl AppState {
         Ok(())
     }
 
-    pub fn import_files(&self, paths: &[PathBuf]) -> anyhow::Result<usize> {
-        let mut inserted = 0;
-        for path in paths {
-            let bytes = match std::fs::read(path) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::warn!("skip {path:?}: {e}");
-                    continue;
-                }
-            };
-            let img = match decode_image(path) {
-                Ok(i) => i,
-                Err(e) => {
-                    log::warn!("skip {path:?}: {e}");
-                    continue;
-                }
-            };
-            let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
-            if self.catalog.find_photo_by_hash(&hash)?.is_some() {
-                log::info!("skip {path:?}: already imported");
+    pub fn import_candidates(&mut self, candidates: Vec<ImportCandidate>) -> anyhow::Result<usize> {
+        let mut photos = Vec::new();
+        for c in candidates {
+            if self.photo_hashes.contains(&c.hash) {
+                log::info!("skip {:?}: already imported", c.path);
                 continue;
             }
-            let thumb = chalkraw_io::make_thumbnail(&img).unwrap_or_default();
-            let mut p = Photo::new(path.clone(), hash, img.width, img.height, ImageFormat::Jpeg);
-            p.thumbnail = thumb;
-            self.catalog.insert_photo(&p)?;
-            inserted += 1;
+            self.photo_hashes.insert(c.hash);
+            let mut p = Photo::new(c.path, c.hash, c.width, c.height, c.format);
+            p.thumbnail = c.thumbnail;
+            photos.push(p);
         }
+        let inserted = photos.len();
+        self.catalog.insert_photos(&photos)?;
+        self.photos_cache.extend(photos);
         Ok(inserted)
     }
 
@@ -155,13 +161,21 @@ impl AppState {
             log::warn!("set flag failed: {e}");
         } else {
             self.current_flag = flag;
+            if let Some(photo) = self.photos_cache.iter_mut().find(|p| p.id == self.photo_id) {
+                photo.flag = flag;
+            }
         }
     }
 
-    pub fn mark_dirty(&mut self) { self.dirty_since = Some(Instant::now()); }
+    pub fn mark_dirty(&mut self) {
+        self.dirty_since = Some(Instant::now());
+    }
 
     pub fn flush_if_due(&mut self) {
-        let due = self.dirty_since.map(|t| t.elapsed() >= DEBOUNCE).unwrap_or(false);
+        let due = self
+            .dirty_since
+            .map(|t| t.elapsed() >= DEBOUNCE)
+            .unwrap_or(false);
         if due {
             if let Err(e) = self.catalog.upsert_edit(self.photo_id, &self.edit) {
                 log::warn!("autosave failed: {e}");
@@ -180,7 +194,8 @@ impl AppState {
     }
 
     pub fn apply_preset(&mut self, id: chalkraw_core::PresetId) -> anyhow::Result<()> {
-        let preset = self.catalog
+        let preset = self
+            .catalog
             .list_presets()?
             .into_iter()
             .find(|p| p.id == id)
@@ -194,35 +209,32 @@ impl AppState {
         self.catalog.delete_preset(id).map_err(Into::into)
     }
 
-    pub fn poll_watch_folder(&mut self) {
-        let Some(dir) = self.watch_folder.clone() else { return };
+    pub fn take_due_watch_folder_scan(&mut self) -> Option<PathBuf> {
+        let Some(dir) = self.watch_folder.clone() else {
+            return None;
+        };
         let now = std::time::Instant::now();
         if let Some(last) = self.last_watch_scan {
-            if now.duration_since(last).as_secs() < 5 { return; }
-        }
-        self.last_watch_scan = Some(now);
-        let extensions = ["jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef", "arw", "raf", "pef", "orf"];
-        let mut paths = Vec::new();
-        walk_dir(&dir, &extensions, &mut paths);
-        if !paths.is_empty() {
-            match self.import_files(&paths) {
-                Ok(n) if n > 0 => log::info!("watch folder: imported {n} new photos"),
-                Ok(_) => {}, // no new (all dedup'd)
-                Err(e) => log::warn!("watch folder import failed: {e}"),
+            if now.duration_since(last).as_secs() < 5 {
+                return None;
             }
         }
+        self.last_watch_scan = Some(now);
+        Some(dir)
     }
 
     /// Navigate to the next (+1) or previous (−1) photo in the catalog.
     /// Wraps around at both ends (Lightroom convention).
     pub fn navigate(&mut self, delta: i32) -> anyhow::Result<()> {
-        let photos = self.catalog.list_photos()?;
+        let photos = self.photos_cache.clone();
         if photos.is_empty() {
             return Ok(());
         }
-        let current_idx = photos.iter().position(|p| p.id == self.photo_id).unwrap_or(0);
-        let new_idx =
-            ((current_idx as i32 + delta).rem_euclid(photos.len() as i32)) as usize;
+        let current_idx = photos
+            .iter()
+            .position(|p| p.id == self.photo_id)
+            .unwrap_or(0);
+        let new_idx = ((current_idx as i32 + delta).rem_euclid(photos.len() as i32)) as usize;
         let new_path = photos[new_idx].original_path.clone();
         self.switch_to_path(new_path)
     }
@@ -233,7 +245,8 @@ impl AppState {
         &self,
         only_picks: bool,
     ) -> anyhow::Result<Vec<chalkraw_export::BatchItem>> {
-        let photos = self.catalog.list_photos()?;
+        let photos = self.photos_cache.clone();
+        let photo_count = photos.len();
         let mut items = Vec::new();
         for p in photos {
             if only_picks && p.flag != Flag::Pick {
@@ -247,7 +260,10 @@ impl AppState {
                 continue;
             }
             if !p.original_path.exists() {
-                log::warn!("skip {:?}: file not found at original_path", p.original_path);
+                log::warn!(
+                    "skip {:?}: file not found at original_path",
+                    p.original_path
+                );
                 continue;
             }
             let edit = self.catalog.get_edit(p.id)?;
@@ -264,11 +280,30 @@ impl AppState {
         }
         log::info!(
             "export filter: only_picks={only_picks}, catalog has {} photos; selected {} for export",
-            self.catalog.list_photos()?.len(),
+            photo_count,
             items.len()
         );
         Ok(items)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportCandidate {
+    path: PathBuf,
+    hash: [u8; 32],
+    width: u32,
+    height: u32,
+    format: ImageFormat,
+    thumbnail: Vec<u8>,
+}
+
+struct ImportProgress {
+    current: usize,
+    total: usize,
+    name: String,
+    done: bool,
+    candidates: Vec<ImportCandidate>,
+    error: Option<String>,
 }
 
 // ── Export dialog state ───────────────────────────────────────────────────────
@@ -404,6 +439,8 @@ pub struct ChalkrawApp {
     gpu: Option<Arc<CanvasGpu>>,
     thumb_textures: HashMap<PhotoId, egui::TextureHandle>,
     export_dialog: Option<ExportDialogState>,
+    import_progress: Option<Arc<Mutex<ImportProgress>>>,
+    import_message: Option<String>,
     watermark_editor: Option<WatermarkEditorState>,
     /// Cached egui textures for image layers shown in the watermark preview overlay.
     /// Keyed by the absolute PNG path; cleared when the editor opens or closes so
@@ -431,14 +468,105 @@ impl ChalkrawApp {
             gpu: None,
             thumb_textures: HashMap::new(),
             export_dialog: None,
+            import_progress: None,
+            import_message: None,
             watermark_editor: None,
             watermark_preview_textures: HashMap::new(),
             gpu_adapter_logged: false,
         })
     }
 
+    fn start_import_paths(&mut self, paths: Vec<PathBuf>, label: &'static str) {
+        if self.import_progress.is_some() {
+            log::warn!("import already running; ignoring new {label} request");
+            return;
+        }
+        let progress = Arc::new(Mutex::new(ImportProgress {
+            current: 0,
+            total: paths.len(),
+            name: String::new(),
+            done: false,
+            candidates: Vec::new(),
+            error: None,
+        }));
+        let progress_thread = progress.clone();
+        std::thread::spawn(move || {
+            let candidates = process_import_paths(paths, &progress_thread);
+            let mut p = progress_thread.lock().unwrap();
+            p.done = true;
+            p.candidates = candidates;
+        });
+        self.import_progress = Some(progress);
+        self.import_message = Some(format!("{label}: queued import"));
+    }
+
+    fn start_import_folder(&mut self, dir: PathBuf, label: &'static str) {
+        if self.import_progress.is_some() {
+            log::warn!("import already running; ignoring new {label} request");
+            return;
+        }
+        let progress = Arc::new(Mutex::new(ImportProgress {
+            current: 0,
+            total: 0,
+            name: dir.display().to_string(),
+            done: false,
+            candidates: Vec::new(),
+            error: None,
+        }));
+        let progress_thread = progress.clone();
+        std::thread::spawn(move || {
+            let extensions = [
+                "jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef", "arw", "raf", "pef",
+                "orf",
+            ];
+            let mut paths = Vec::new();
+            walk_dir(&dir, &extensions, &mut paths);
+            {
+                let mut p = progress_thread.lock().unwrap();
+                p.total = paths.len();
+                p.current = 0;
+            }
+            let candidates = process_import_paths(paths, &progress_thread);
+            let mut p = progress_thread.lock().unwrap();
+            p.done = true;
+            p.candidates = candidates;
+        });
+        self.import_progress = Some(progress);
+        self.import_message = Some(format!("{label}: scanning folder"));
+    }
+
+    fn finish_import_if_ready(&mut self) {
+        let Some(progress_arc) = self.import_progress.as_ref() else {
+            return;
+        };
+        let done = progress_arc.lock().unwrap().done;
+        if !done {
+            return;
+        }
+        let progress_arc = self.import_progress.take().unwrap();
+        let (candidates, error) = {
+            let mut p = progress_arc.lock().unwrap();
+            (std::mem::take(&mut p.candidates), p.error.clone())
+        };
+        if let Some(error) = error {
+            self.import_message = Some(format!("Import failed: {error}"));
+            return;
+        }
+        match self.state.import_candidates(candidates) {
+            Ok(n) => {
+                self.thumb_textures.clear();
+                self.import_message = Some(format!("Imported {n} new photos"));
+            }
+            Err(e) => {
+                self.import_message = Some(format!("Import failed: {e}"));
+            }
+        }
+    }
+
     fn ensure_gpu(&mut self, frame: &eframe::Frame) {
-        if self.gpu.is_some() { return; }
+        if self.gpu.is_some() {
+            return;
+        }
         let render_state = match frame.wgpu_render_state() {
             Some(rs) => rs,
             None => return,
@@ -447,7 +575,10 @@ impl ChalkrawApp {
             let info = render_state.adapter.get_info();
             log::info!(
                 "egui canvas GPU: {} ({:?}, backend {:?}, vendor 0x{:04X})",
-                info.name, info.device_type, info.backend, info.vendor
+                info.name,
+                info.device_type,
+                info.backend,
+                info.vendor
             );
             self.gpu_adapter_logged = true;
         }
@@ -503,15 +634,24 @@ fn anchor_pos(
 ) -> egui::Pos2 {
     use chalkraw_core::WatermarkAnchor::*;
     let (x, y) = match anchor {
-        TopLeft      => (image_rect.min.x + margin,         image_rect.min.y + margin),
-        TopCenter    => (image_rect.center().x - w / 2.0,   image_rect.min.y + margin),
-        TopRight     => (image_rect.max.x - w - margin,     image_rect.min.y + margin),
-        CenterLeft   => (image_rect.min.x + margin,         image_rect.center().y - h / 2.0),
-        Center       => (image_rect.center().x - w / 2.0,   image_rect.center().y - h / 2.0),
-        CenterRight  => (image_rect.max.x - w - margin,     image_rect.center().y - h / 2.0),
-        BottomLeft   => (image_rect.min.x + margin,         image_rect.max.y - h - margin),
-        BottomCenter => (image_rect.center().x - w / 2.0,   image_rect.max.y - h - margin),
-        BottomRight  => (image_rect.max.x - w - margin,     image_rect.max.y - h - margin),
+        TopLeft => (image_rect.min.x + margin, image_rect.min.y + margin),
+        TopCenter => (image_rect.center().x - w / 2.0, image_rect.min.y + margin),
+        TopRight => (image_rect.max.x - w - margin, image_rect.min.y + margin),
+        CenterLeft => (image_rect.min.x + margin, image_rect.center().y - h / 2.0),
+        Center => (
+            image_rect.center().x - w / 2.0,
+            image_rect.center().y - h / 2.0,
+        ),
+        CenterRight => (
+            image_rect.max.x - w - margin,
+            image_rect.center().y - h / 2.0,
+        ),
+        BottomLeft => (image_rect.min.x + margin, image_rect.max.y - h - margin),
+        BottomCenter => (
+            image_rect.center().x - w / 2.0,
+            image_rect.max.y - h - margin,
+        ),
+        BottomRight => (image_rect.max.x - w - margin, image_rect.max.y - h - margin),
     };
     egui::Pos2::new(x, y)
 }
@@ -572,7 +712,13 @@ fn draw_watermark_overlay(
                     (target_long_screen * aspect, target_long_screen)
                 };
                 let margin_screen = img_layer.margin_pct / 100.0 * long_edge_screen;
-                let pos = anchor_pos(image_rect, w_screen, h_screen, img_layer.anchor, margin_screen);
+                let pos = anchor_pos(
+                    image_rect,
+                    w_screen,
+                    h_screen,
+                    img_layer.anchor,
+                    margin_screen,
+                );
                 let layer_rect = egui::Rect::from_min_size(pos, egui::vec2(w_screen, h_screen));
 
                 let alpha = (img_layer.opacity.clamp(0.0, 1.0) * 255.0) as u8;
@@ -593,11 +739,9 @@ fn draw_watermark_overlay(
                     alpha,
                 );
                 // Measure the text so we can honour the anchor correctly.
-                let galley = ui.painter().layout_no_wrap(
-                    text_layer.text.clone(),
-                    font_id,
-                    text_color,
-                );
+                let galley =
+                    ui.painter()
+                        .layout_no_wrap(text_layer.text.clone(), font_id, text_color);
                 let (w, h) = (galley.size().x, galley.size().y);
                 let margin_screen = text_layer.margin_pct / 100.0 * long_edge_screen;
                 let pos = anchor_pos(image_rect, w, h, text_layer.anchor, margin_screen);
@@ -630,9 +774,59 @@ pub(crate) fn walk_dir(dir: &std::path::Path, extensions: &[&str], out: &mut Vec
     }
 }
 
+fn process_import_paths(
+    paths: Vec<PathBuf>,
+    progress: &Arc<Mutex<ImportProgress>>,
+) -> Vec<ImportCandidate> {
+    let total = paths.len();
+    let mut candidates = Vec::new();
+    for (idx, path) in paths.into_iter().enumerate() {
+        {
+            let mut p = progress.lock().unwrap();
+            p.current = idx + 1;
+            p.total = total;
+            p.name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+        }
+
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("skip {path:?}: {e}");
+                continue;
+            }
+        };
+        let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
+        let img = match chalkraw_io::decode_image_from_bytes(&path, &bytes) {
+            Ok(i) => i,
+            Err(e) => {
+                log::warn!("skip {path:?}: {e}");
+                continue;
+            }
+        };
+        let thumbnail = chalkraw_io::make_thumbnail(&img).unwrap_or_default();
+        candidates.push(ImportCandidate {
+            path,
+            hash,
+            width: img.width,
+            height: img.height,
+            format: img.format,
+            thumbnail,
+        });
+    }
+    candidates
+}
+
 impl eframe::App for ChalkrawApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.state.poll_watch_folder();
+        self.finish_import_if_ready();
+        if self.import_progress.is_none() {
+            if let Some(dir) = self.state.take_due_watch_folder_scan() {
+                self.start_import_folder(dir, "Watch folder");
+            }
+        }
         self.ensure_gpu(frame);
 
         let mut to_set: Option<Flag> = None;
@@ -650,9 +844,7 @@ impl eframe::App for ChalkrawApp {
             // ArrowRight / ] → next photo.  ArrowLeft / [ → previous photo.
             if i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::CloseBracket) {
                 nav = Some(1);
-            } else if i.key_pressed(egui::Key::ArrowLeft)
-                || i.key_pressed(egui::Key::OpenBracket)
-            {
+            } else if i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::OpenBracket) {
                 nav = Some(-1);
             }
         });
@@ -673,7 +865,13 @@ impl eframe::App for ChalkrawApp {
                     if ui.button("Open Photo…").clicked() {
                         ui.close();
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef", "arw", "raf", "pef", "orf"])
+                            .add_filter(
+                                "Images",
+                                &[
+                                    "jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef",
+                                    "arw", "raf", "pef", "orf",
+                                ],
+                            )
                             .pick_file()
                         {
                             if let Err(e) = self.state.switch_to_path(path) {
@@ -687,40 +885,33 @@ impl eframe::App for ChalkrawApp {
                     if ui.button("Import Photos…").clicked() {
                         ui.close();
                         if let Some(paths) = rfd::FileDialog::new()
-                            .add_filter("Images", &["jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef", "arw", "raf", "pef", "orf"])
+                            .add_filter(
+                                "Images",
+                                &[
+                                    "jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef",
+                                    "arw", "raf", "pef", "orf",
+                                ],
+                            )
                             .pick_files()
                         {
-                            match self.state.import_files(&paths) {
-                                Ok(n) => log::info!("imported {n} new photos"),
-                                Err(e) => log::warn!("import failed: {e}"),
-                            }
-                            self.thumb_textures.clear();
+                            self.start_import_paths(paths, "Import photos");
                         }
                     }
                     if ui.button("Import Folder…").clicked() {
                         ui.close();
                         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                            let extensions = ["jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef", "arw", "raf", "pef", "orf"];
-                            let mut paths = Vec::new();
-                            walk_dir(&dir, &extensions, &mut paths);
-                            log::info!("scanning {dir:?}: found {} candidates", paths.len());
-                            match self.state.import_files(&paths) {
-                                Ok(n) => log::info!("imported {n} new photos from folder"),
-                                Err(e) => log::warn!("folder import failed: {e}"),
-                            }
-                            self.thumb_textures.clear();
+                            self.start_import_folder(dir, "Import folder");
                         }
                     }
                     if ui.button("Watch Folder…").clicked() {
                         ui.close();
                         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                             self.state.watch_folder = Some(dir);
-                            self.state.last_watch_scan = None;  // force scan on next frame
+                            self.state.last_watch_scan = None; // force scan on next frame
                             log::info!("watching folder: {:?}", self.state.watch_folder);
                         }
                     }
-                    if self.state.watch_folder.is_some()
-                        && ui.button("Stop Watching").clicked() {
+                    if self.state.watch_folder.is_some() && ui.button("Stop Watching").clicked() {
                         ui.close();
                         self.state.watch_folder = None;
                     }
@@ -732,8 +923,12 @@ impl eframe::App for ChalkrawApp {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
-                ui.menu_button("Library", |ui| { ui.label("(Phase 3)"); });
-                ui.menu_button("Develop", |ui| { ui.label("(Phase 2)"); });
+                ui.menu_button("Library", |ui| {
+                    ui.label("(Phase 3)");
+                });
+                ui.menu_button("Develop", |ui| {
+                    ui.label("(Phase 2)");
+                });
                 ui.menu_button("Export", |ui| {
                     if ui.button("Batch Export…").clicked() {
                         ui.close();
@@ -742,88 +937,104 @@ impl eframe::App for ChalkrawApp {
                 });
                 let path = self.state.catalog.path().display().to_string();
                 ui.label(format!("  catalog: {path}  |  P=Pick  U=None  X=Reject"));
+                if let Some(progress) = self.import_progress.as_ref() {
+                    let p = progress.lock().unwrap();
+                    let total = p.total;
+                    let current = p.current.min(total);
+                    let name = if p.name.is_empty() {
+                        "scanning".to_string()
+                    } else {
+                        p.name.clone()
+                    };
+                    ui.label(format!("  import: {current}/{total} {name}"));
+                } else if let Some(message) = &self.import_message {
+                    ui.label(format!("  {message}"));
+                }
             });
         });
 
-        let mut edit_changed = false;
-        egui::SidePanel::left("left").default_width(220.0).show(ctx, |ui| {
-            edit_changed |= left_panel(ui, &mut self.state);
-        });
-
-        egui::SidePanel::right("right").default_width(280.0).show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                edit_changed |= right_panel(ui, &mut self.state.edit);
+        let mut edit_change = EditChange::default();
+        egui::SidePanel::left("left")
+            .default_width(220.0)
+            .show(ctx, |ui| {
+                if left_panel(ui, &mut self.state) {
+                    edit_change.merge(EditChange::all());
+                }
             });
-        });
 
-        egui::TopBottomPanel::bottom("filmstrip").default_height(120.0).show(ctx, |ui| {
-            let mut photos = match self.state.catalog.list_photos() {
-                Ok(p) => p,
-                Err(e) => {
-                    ui.label(format!("filmstrip error: {e}"));
-                    return;
-                }
-            };
-            if let Some(filter) = &self.state.folder_filter {
-                photos.retain(|p| p.original_path.parent() == Some(filter.as_path()));
-            }
-            if photos.is_empty() {
-                if self.state.folder_filter.is_some() {
-                    ui.label("No photos in this folder.");
-                } else {
-                    ui.label("No photos yet. File → Import Photos / Import Folder…");
-                }
-                return;
-            }
-            let current_id = self.state.photo_id;
-            let mut clicked: Option<PathBuf> = None;
-            let thumbs: Vec<(PhotoId, PathBuf, egui::TextureHandle, Flag)> = photos.iter()
-                .map(|p| {
-                    let tex = self.ensure_thumb(ctx, p);
-                    (p.id, p.original_path.clone(), tex, p.flag)
-                })
-                .collect();
-            egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (pid, path, tex, flag) in &thumbs {
-                        let is_current = *pid == current_id;
-                        let img = egui::Image::new(tex).max_height(100.0).max_width(140.0);
-                        let response = ui.add(img.sense(egui::Sense::click()));
-                        let flag_color = match flag {
-                            Flag::Pick   => Some(egui::Color32::from_rgb(80, 200, 80)),
-                            Flag::Reject => Some(egui::Color32::from_rgb(220, 80, 80)),
-                            Flag::None   => None,
-                        };
-                        if let Some(c) = flag_color {
-                            ui.painter().rect_stroke(
-                                response.rect,
-                                2.0,
-                                egui::Stroke::new(2.0, c),
-                                egui::StrokeKind::Outside,
-                            );
-                        }
-                        if is_current {
-                            ui.painter().rect_stroke(
-                                response.rect,
-                                2.0,
-                                egui::Stroke::new(2.0, egui::Color32::from_rgb(220, 200, 60)),
-                                egui::StrokeKind::Outside,
-                            );
-                        }
-                        if response.clicked() {
-                            clicked = Some(path.clone());
-                        }
-                    }
+        egui::SidePanel::right("right")
+            .default_width(280.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    edit_change.merge(right_panel(ui, &mut self.state.edit));
                 });
             });
-            if let Some(path) = clicked {
-                if let Err(e) = self.state.switch_to_path(path) {
-                    log::warn!("switch_to_path failed: {e}");
-                } else {
-                    self.gpu = None;
+
+        egui::TopBottomPanel::bottom("filmstrip")
+            .default_height(120.0)
+            .show(ctx, |ui| {
+                let mut photos = self.state.photos_cache.clone();
+                if let Some(filter) = &self.state.folder_filter {
+                    photos.retain(|p| p.original_path.parent() == Some(filter.as_path()));
                 }
-            }
-        });
+                if photos.is_empty() {
+                    if self.state.folder_filter.is_some() {
+                        ui.label("No photos in this folder.");
+                    } else {
+                        ui.label("No photos yet. File → Import Photos / Import Folder…");
+                    }
+                    return;
+                }
+                let current_id = self.state.photo_id;
+                let mut clicked: Option<PathBuf> = None;
+                let thumbs: Vec<(PhotoId, PathBuf, egui::TextureHandle, Flag)> = photos
+                    .iter()
+                    .map(|p| {
+                        let tex = self.ensure_thumb(ctx, p);
+                        (p.id, p.original_path.clone(), tex, p.flag)
+                    })
+                    .collect();
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (pid, path, tex, flag) in &thumbs {
+                            let is_current = *pid == current_id;
+                            let img = egui::Image::new(tex).max_height(100.0).max_width(140.0);
+                            let response = ui.add(img.sense(egui::Sense::click()));
+                            let flag_color = match flag {
+                                Flag::Pick => Some(egui::Color32::from_rgb(80, 200, 80)),
+                                Flag::Reject => Some(egui::Color32::from_rgb(220, 80, 80)),
+                                Flag::None => None,
+                            };
+                            if let Some(c) = flag_color {
+                                ui.painter().rect_stroke(
+                                    response.rect,
+                                    2.0,
+                                    egui::Stroke::new(2.0, c),
+                                    egui::StrokeKind::Outside,
+                                );
+                            }
+                            if is_current {
+                                ui.painter().rect_stroke(
+                                    response.rect,
+                                    2.0,
+                                    egui::Stroke::new(2.0, egui::Color32::from_rgb(220, 200, 60)),
+                                    egui::StrokeKind::Outside,
+                                );
+                            }
+                            if response.clicked() {
+                                clicked = Some(path.clone());
+                            }
+                        }
+                    });
+                });
+                if let Some(path) = clicked {
+                    if let Err(e) = self.state.switch_to_path(path) {
+                        log::warn!("switch_to_path failed: {e}");
+                    } else {
+                        self.gpu = None;
+                    }
+                }
+            });
 
         // Phase 5C: snapshot the working preset (if the editor is open) so we can
         // draw the overlay inside the CentralPanel closure without conflicting
@@ -835,15 +1046,24 @@ impl eframe::App for ChalkrawApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(gpu) = self.gpu.as_ref() {
-                if edit_changed {
-                    gpu.update(&self.state.edit);
-                    // Re-upload the point curve LUT whenever the edit changes.
-                    gpu.upload_tone_curve(&self.state.edit.tone_curve.rgb.0);
-                    // Re-run blurs on every edit change. Clarity=σ16, Sharpening=radius slider,
-                    // Texture=σ5, NR=bilateral (nr_amount = average of luminance and color sliders).
-                    let nr_amount = (self.state.edit.detail.noise_reduction.luminance
-                        + self.state.edit.detail.noise_reduction.color) / 2.0;
-                    gpu.run_blurs(16.0, self.state.edit.detail.sharpening.radius, 5.0, nr_amount);
+                if edit_change.any() {
+                    if edit_change.uniforms {
+                        gpu.update(&self.state.edit);
+                    }
+                    if edit_change.tone_curve {
+                        gpu.upload_tone_curve(&self.state.edit.tone_curve.rgb.0);
+                    }
+                    if edit_change.blur_inputs {
+                        let nr_amount = (self.state.edit.detail.noise_reduction.luminance
+                            + self.state.edit.detail.noise_reduction.color)
+                            / 2.0;
+                        gpu.run_blurs(
+                            16.0,
+                            self.state.edit.detail.sharpening.radius,
+                            5.0,
+                            nr_amount,
+                        );
+                    }
                     self.state.mark_dirty();
                 }
 
@@ -873,7 +1093,10 @@ impl eframe::App for ChalkrawApp {
                     (
                         i.smooth_scroll_delta.y,
                         i.modifiers.ctrl,
-                        i.pointer.hover_pos().map(|p| full_rect.contains(p)).unwrap_or(false),
+                        i.pointer
+                            .hover_pos()
+                            .map(|p| full_rect.contains(p))
+                            .unwrap_or(false),
                     )
                 });
                 if scroll_y.abs() > 0.0 && pointer_over_canvas {
@@ -913,10 +1136,8 @@ impl eframe::App for ChalkrawApp {
 
                 // Position the image rect centred in the panel, offset by pan.
                 let centre = full_rect.center() + self.state.canvas_pan;
-                let image_rect = egui::Rect::from_center_size(
-                    centre,
-                    egui::vec2(zoomed_w, zoomed_h),
-                );
+                let image_rect =
+                    egui::Rect::from_center_size(centre, egui::vec2(zoomed_w, zoomed_h));
 
                 ui.painter().add(egui::Shape::Callback(
                     egui_wgpu::Callback::new_paint_callback(
@@ -1203,7 +1424,9 @@ impl eframe::App for ChalkrawApp {
                     let format = match dlg_inner.format_index {
                         1 => chalkraw_export::ExportFormat::Png,
                         2 => chalkraw_export::ExportFormat::Tiff,
-                        _ => chalkraw_export::ExportFormat::Jpeg { quality: dlg_inner.quality },
+                        _ => chalkraw_export::ExportFormat::Jpeg {
+                            quality: dlg_inner.quality,
+                        },
                     };
                     let resize = if dlg_inner.resize_long_edge {
                         chalkraw_export::ExportResize::LongEdge(dlg_inner.long_edge)
@@ -1212,7 +1435,10 @@ impl eframe::App for ChalkrawApp {
                     };
                     // Resolve preset: load from catalog by id if one is selected.
                     let watermark_preset = dlg_inner.watermark_preset_id.and_then(|id| {
-                        self.state.catalog.list_watermarks().ok()
+                        self.state
+                            .catalog
+                            .list_watermarks()
+                            .ok()
                             .and_then(|list| list.into_iter().find(|p| p.id == id))
                     });
                     let opts = chalkraw_export::BatchOptions {
@@ -1307,24 +1533,34 @@ impl eframe::App for ChalkrawApp {
                     ui.label(egui::RichText::new("Layers").strong());
 
                     let anchor_labels = [
-                        "↖ TL", "↑ TC", "↗ TR",
-                        "← CL", "·  C", "→ CR",
-                        "↙ BL", "↓ BC", "↘ BR",
+                        "↖ TL", "↑ TC", "↗ TR", "← CL", "·  C", "→ CR", "↙ BL", "↓ BC", "↘ BR",
                     ];
                     fn anchor_to_idx(a: chalkraw_core::WatermarkAnchor) -> usize {
                         use chalkraw_core::WatermarkAnchor::*;
                         match a {
-                            TopLeft => 0, TopCenter => 1, TopRight => 2,
-                            CenterLeft => 3, Center => 4, CenterRight => 5,
-                            BottomLeft => 6, BottomCenter => 7, BottomRight => 8,
+                            TopLeft => 0,
+                            TopCenter => 1,
+                            TopRight => 2,
+                            CenterLeft => 3,
+                            Center => 4,
+                            CenterRight => 5,
+                            BottomLeft => 6,
+                            BottomCenter => 7,
+                            BottomRight => 8,
                         }
                     }
                     fn idx_to_anchor(i: usize) -> chalkraw_core::WatermarkAnchor {
                         use chalkraw_core::WatermarkAnchor::*;
                         match i {
-                            0 => TopLeft, 1 => TopCenter, 2 => TopRight,
-                            3 => CenterLeft, 4 => Center, 5 => CenterRight,
-                            6 => BottomLeft, 7 => BottomCenter, _ => BottomRight,
+                            0 => TopLeft,
+                            1 => TopCenter,
+                            2 => TopRight,
+                            3 => CenterLeft,
+                            4 => Center,
+                            5 => CenterRight,
+                            6 => BottomLeft,
+                            7 => BottomCenter,
+                            _ => BottomRight,
                         }
                     }
 
@@ -1333,7 +1569,12 @@ impl eframe::App for ChalkrawApp {
                     }
                     fn egui_to_text_color(c: egui::Color32) -> chalkraw_core::TextColor {
                         let arr = c.to_array();
-                        chalkraw_core::TextColor { r: arr[0], g: arr[1], b: arr[2], a: arr[3] }
+                        chalkraw_core::TextColor {
+                            r: arr[0],
+                            g: arr[1],
+                            b: arr[2],
+                            a: arr[3],
+                        }
                     }
 
                     // Capture layer count before the mutable borrow in iter_mut().
@@ -1344,7 +1585,10 @@ impl eframe::App for ChalkrawApp {
                             chalkraw_core::WatermarkLayer::Image(ref mut img) => {
                                 let header_text = format!(
                                     "Image: {}  [{}]  {}%  {}%",
-                                    img.png_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "(unset)".into()),
+                                    img.png_path
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| "(unset)".into()),
                                     anchor_labels[anchor_to_idx(img.anchor)],
                                     img.size_pct as u32,
                                     (img.opacity * 100.0) as u32,
@@ -1366,40 +1610,69 @@ impl eframe::App for ChalkrawApp {
                                         });
                                         let path_str = img.png_path.display().to_string();
                                         if path_str.is_empty() {
-                                            ui.colored_label(egui::Color32::YELLOW, "(no PNG selected)");
+                                            ui.colored_label(
+                                                egui::Color32::YELLOW,
+                                                "(no PNG selected)",
+                                            );
                                         } else {
                                             ui.label(&path_str);
                                         }
                                         ui.add_space(4.0);
                                         ui.label("Anchor:");
                                         let mut anchor_idx = anchor_to_idx(img.anchor);
-                                        egui::Grid::new(format!("wm_anchor_{idx}")).num_columns(3).show(ui, |ui| {
-                                            for (i, label) in anchor_labels.iter().enumerate() {
-                                                let selected = anchor_idx == i;
-                                                if ui.add(egui::Button::new(*label).selected(selected)).clicked() {
-                                                    anchor_idx = i;
+                                        egui::Grid::new(format!("wm_anchor_{idx}"))
+                                            .num_columns(3)
+                                            .show(ui, |ui| {
+                                                for (i, label) in anchor_labels.iter().enumerate() {
+                                                    let selected = anchor_idx == i;
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(*label)
+                                                                .selected(selected),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        anchor_idx = i;
+                                                    }
+                                                    if i % 3 == 2 {
+                                                        ui.end_row();
+                                                    }
                                                 }
-                                                if i % 3 == 2 { ui.end_row(); }
-                                            }
-                                        });
+                                            });
                                         img.anchor = idx_to_anchor(anchor_idx);
                                         ui.horizontal(|ui| {
                                             ui.label("Size (% long edge):");
-                                            ui.add(egui::Slider::new(&mut img.size_pct, 1.0..=50.0).fixed_decimals(0));
+                                            ui.add(
+                                                egui::Slider::new(&mut img.size_pct, 1.0..=50.0)
+                                                    .fixed_decimals(0),
+                                            );
                                         });
                                         ui.horizontal(|ui| {
                                             ui.label("Opacity (%):");
                                             let mut op_pct = img.opacity * 100.0;
-                                            ui.add(egui::Slider::new(&mut op_pct, 0.0..=100.0).fixed_decimals(0));
+                                            ui.add(
+                                                egui::Slider::new(&mut op_pct, 0.0..=100.0)
+                                                    .fixed_decimals(0),
+                                            );
                                             img.opacity = op_pct / 100.0;
                                         });
                                         ui.horizontal(|ui| {
                                             ui.label("Margin (% long edge):");
-                                            ui.add(egui::Slider::new(&mut img.margin_pct, 0.0..=20.0).fixed_decimals(0));
+                                            ui.add(
+                                                egui::Slider::new(&mut img.margin_pct, 0.0..=20.0)
+                                                    .fixed_decimals(0),
+                                            );
                                         });
                                         ui.horizontal(|ui| {
                                             ui.label("Rotation");
-                                            ui.add(egui::Slider::new(&mut img.rotation_deg, -180.0..=180.0).fixed_decimals(0).suffix("°"));
+                                            ui.add(
+                                                egui::Slider::new(
+                                                    &mut img.rotation_deg,
+                                                    -180.0..=180.0,
+                                                )
+                                                .fixed_decimals(0)
+                                                .suffix("°"),
+                                            );
                                         });
                                         if ui.button("Remove layer").clicked() {
                                             remove_layer = Some(idx);
@@ -1408,22 +1681,32 @@ impl eframe::App for ChalkrawApp {
                                     .header_response
                                     .clicked()
                                 {
-                                    editor.expanded_layer = if is_expanded { None } else { Some(idx) };
+                                    editor.expanded_layer =
+                                        if is_expanded { None } else { Some(idx) };
                                 }
                                 // Reorder / delete buttons shown next to every layer row.
                                 // Top of list = drawn first (background); bottom = drawn last (foreground).
                                 ui.horizontal(|ui| {
                                     ui.add_enabled_ui(idx > 0, |ui| {
-                                        if ui.small_button("↑").on_hover_text("Move layer earlier (further back)").clicked() {
+                                        if ui
+                                            .small_button("↑")
+                                            .on_hover_text("Move layer earlier (further back)")
+                                            .clicked()
+                                        {
                                             move_up_layer = Some(idx);
                                         }
                                     });
                                     ui.add_enabled_ui(idx + 1 < layer_count, |ui| {
-                                        if ui.small_button("↓").on_hover_text("Move layer later (further front)").clicked() {
+                                        if ui
+                                            .small_button("↓")
+                                            .on_hover_text("Move layer later (further front)")
+                                            .clicked()
+                                        {
                                             move_down_layer = Some(idx);
                                         }
                                     });
-                                    if ui.small_button("✕").on_hover_text("Delete layer").clicked() {
+                                    if ui.small_button("✕").on_hover_text("Delete layer").clicked()
+                                    {
                                         remove_layer = Some(idx);
                                     }
                                 });
@@ -1431,7 +1714,11 @@ impl eframe::App for ChalkrawApp {
                             chalkraw_core::WatermarkLayer::Text(ref mut txt) => {
                                 let header_text = format!(
                                     "Text: \"{}\"  [{}]  {:.1}%  {}%",
-                                    if txt.text.len() > 20 { &txt.text[..20] } else { &txt.text },
+                                    if txt.text.len() > 20 {
+                                        &txt.text[..20]
+                                    } else {
+                                        &txt.text
+                                    },
                                     anchor_labels[anchor_to_idx(txt.anchor)],
                                     txt.font_size_pct,
                                     (txt.opacity * 100.0) as u32,
@@ -1450,8 +1737,11 @@ impl eframe::App for ChalkrawApp {
                                         ui.horizontal(|ui| {
                                             ui.label("Font size (% long edge):");
                                             ui.add(
-                                                egui::Slider::new(&mut txt.font_size_pct, 0.5..=10.0)
-                                                    .fixed_decimals(1),
+                                                egui::Slider::new(
+                                                    &mut txt.font_size_pct,
+                                                    0.5..=10.0,
+                                                )
+                                                .fixed_decimals(1),
                                             );
                                         });
                                         ui.horizontal(|ui| {
@@ -1470,29 +1760,52 @@ impl eframe::App for ChalkrawApp {
                                         ui.add_space(4.0);
                                         ui.label("Anchor:");
                                         let mut anchor_idx = anchor_to_idx(txt.anchor);
-                                        egui::Grid::new(format!("wm_text_anchor_{idx}")).num_columns(3).show(ui, |ui| {
-                                            for (i, label) in anchor_labels.iter().enumerate() {
-                                                let selected = anchor_idx == i;
-                                                if ui.add(egui::Button::new(*label).selected(selected)).clicked() {
-                                                    anchor_idx = i;
+                                        egui::Grid::new(format!("wm_text_anchor_{idx}"))
+                                            .num_columns(3)
+                                            .show(ui, |ui| {
+                                                for (i, label) in anchor_labels.iter().enumerate() {
+                                                    let selected = anchor_idx == i;
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(*label)
+                                                                .selected(selected),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        anchor_idx = i;
+                                                    }
+                                                    if i % 3 == 2 {
+                                                        ui.end_row();
+                                                    }
                                                 }
-                                                if i % 3 == 2 { ui.end_row(); }
-                                            }
-                                        });
+                                            });
                                         txt.anchor = idx_to_anchor(anchor_idx);
                                         ui.horizontal(|ui| {
                                             ui.label("Opacity (%):");
                                             let mut op_pct = txt.opacity * 100.0;
-                                            ui.add(egui::Slider::new(&mut op_pct, 0.0..=100.0).fixed_decimals(0));
+                                            ui.add(
+                                                egui::Slider::new(&mut op_pct, 0.0..=100.0)
+                                                    .fixed_decimals(0),
+                                            );
                                             txt.opacity = op_pct / 100.0;
                                         });
                                         ui.horizontal(|ui| {
                                             ui.label("Margin (% long edge):");
-                                            ui.add(egui::Slider::new(&mut txt.margin_pct, 0.0..=20.0).fixed_decimals(0));
+                                            ui.add(
+                                                egui::Slider::new(&mut txt.margin_pct, 0.0..=20.0)
+                                                    .fixed_decimals(0),
+                                            );
                                         });
                                         ui.horizontal(|ui| {
                                             ui.label("Rotation");
-                                            ui.add(egui::Slider::new(&mut txt.rotation_deg, -180.0..=180.0).fixed_decimals(0).suffix("°"));
+                                            ui.add(
+                                                egui::Slider::new(
+                                                    &mut txt.rotation_deg,
+                                                    -180.0..=180.0,
+                                                )
+                                                .fixed_decimals(0)
+                                                .suffix("°"),
+                                            );
                                         });
                                         if ui.button("Remove layer").clicked() {
                                             remove_layer = Some(idx);
@@ -1501,22 +1814,32 @@ impl eframe::App for ChalkrawApp {
                                     .header_response
                                     .clicked()
                                 {
-                                    editor.expanded_layer = if is_expanded { None } else { Some(idx) };
+                                    editor.expanded_layer =
+                                        if is_expanded { None } else { Some(idx) };
                                 }
                                 // Reorder / delete buttons shown next to every layer row.
                                 // Top of list = drawn first (background); bottom = drawn last (foreground).
                                 ui.horizontal(|ui| {
                                     ui.add_enabled_ui(idx > 0, |ui| {
-                                        if ui.small_button("↑").on_hover_text("Move layer earlier (further back)").clicked() {
+                                        if ui
+                                            .small_button("↑")
+                                            .on_hover_text("Move layer earlier (further back)")
+                                            .clicked()
+                                        {
                                             move_up_layer = Some(idx);
                                         }
                                     });
                                     ui.add_enabled_ui(idx + 1 < layer_count, |ui| {
-                                        if ui.small_button("↓").on_hover_text("Move layer later (further front)").clicked() {
+                                        if ui
+                                            .small_button("↓")
+                                            .on_hover_text("Move layer later (further front)")
+                                            .clicked()
+                                        {
                                             move_down_layer = Some(idx);
                                         }
                                     });
-                                    if ui.small_button("✕").on_hover_text("Delete layer").clicked() {
+                                    if ui.small_button("✕").on_hover_text("Delete layer").clicked()
+                                    {
                                         remove_layer = Some(idx);
                                     }
                                 });
@@ -1530,9 +1853,12 @@ impl eframe::App for ChalkrawApp {
                         }
                         if ui.button("+ Add Text Layer").clicked() {
                             let new_idx = editor.current.layers.len();
-                            editor.current.layers.push(chalkraw_core::WatermarkLayer::Text(
-                                chalkraw_core::TextLayer::default(),
-                            ));
+                            editor
+                                .current
+                                .layers
+                                .push(chalkraw_core::WatermarkLayer::Text(
+                                    chalkraw_core::TextLayer::default(),
+                                ));
                             editor.expanded_layer = Some(new_idx);
                         }
                     });
@@ -1577,9 +1903,12 @@ impl eframe::App for ChalkrawApp {
             }
             if add_layer {
                 let new_idx = editor.current.layers.len();
-                editor.current.layers.push(chalkraw_core::WatermarkLayer::Image(
-                    chalkraw_core::ImageLayer::default(),
-                ));
+                editor
+                    .current
+                    .layers
+                    .push(chalkraw_core::WatermarkLayer::Image(
+                        chalkraw_core::ImageLayer::default(),
+                    ));
                 editor.expanded_layer = Some(new_idx);
             }
             if save_clicked {
@@ -1604,6 +1933,9 @@ impl eframe::App for ChalkrawApp {
         // Keep the watch-folder poll alive when the app is idle.
         if self.state.watch_folder.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_secs(5));
+        }
+        if self.import_progress.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
         // Debounced autosave.

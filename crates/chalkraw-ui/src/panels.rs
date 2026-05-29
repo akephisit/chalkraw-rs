@@ -1,6 +1,33 @@
 use chalkraw_core::{interpolate_curve, EditState};
 use egui::Ui;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EditChange {
+    pub uniforms: bool,
+    pub tone_curve: bool,
+    pub blur_inputs: bool,
+}
+
+impl EditChange {
+    pub fn all() -> Self {
+        Self {
+            uniforms: true,
+            tone_curve: true,
+            blur_inputs: true,
+        }
+    }
+
+    pub fn any(self) -> bool {
+        self.uniforms || self.tone_curve || self.blur_inputs
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.uniforms |= other.uniforms;
+        self.tone_curve |= other.tone_curve;
+        self.blur_inputs |= other.blur_inputs;
+    }
+}
+
 // ── Scroll-aware slider helpers ───────────────────────────────────────────────
 
 /// Wrap an egui Slider with mouse-wheel-while-hovered support. Returns true if
@@ -46,7 +73,9 @@ fn slider_scroll_suffix(
     decimals: usize,
     suffix: &str,
 ) -> bool {
-    let slider = egui::Slider::new(value, range.clone()).fixed_decimals(decimals).suffix(suffix);
+    let slider = egui::Slider::new(value, range.clone())
+        .fixed_decimals(decimals)
+        .suffix(suffix);
     let response = ui.add(slider);
     let mut changed = response.changed();
     if response.hovered() {
@@ -96,10 +125,7 @@ fn hsv_to_color32(h_deg: f32, s: f32, v: f32) -> egui::Color32 {
 /// Draws a 130×130 hue-spectrum disc; the draggable dot's angle encodes hue
 /// (0..360°) and its distance from centre encodes saturation (0..100).
 /// Right-click resets to neutral (H=0, S=0).  Returns `true` when changed.
-pub fn color_wheel_widget(
-    ui: &mut egui::Ui,
-    grade: &mut chalkraw_core::GradeTone,
-) -> bool {
+pub fn color_wheel_widget(ui: &mut egui::Ui, grade: &mut chalkraw_core::GradeTone) -> bool {
     let mut changed = false;
     let desired = egui::vec2(140.0, 160.0); // 140 for wheel + 20 for label
     let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click_and_drag());
@@ -256,8 +282,7 @@ pub fn point_curve_widget(ui: &mut egui::Ui, curve: &mut chalkraw_core::Curve) -
     // For drag: find the point closest to where the drag started.  We remember
     // the active index across frames using the egui memory (keyed by widget id).
     let widget_id = response.id;
-    let mut dragged_idx: Option<usize> =
-        ui.memory(|m| m.data.get_temp::<usize>(widget_id));
+    let mut dragged_idx: Option<usize> = ui.memory(|m| m.data.get_temp::<usize>(widget_id));
 
     // On drag release, clear the stored index.
     if response.drag_stopped() {
@@ -281,9 +306,7 @@ pub fn point_curve_widget(ui: &mut egui::Ui, curve: &mut chalkraw_core::Curve) -
             let mut best: Option<(usize, f32)> = None;
             for (idx, p) in curve.0.iter().enumerate() {
                 let d = (to_screen(*p) - drag_pos).length();
-                if d < hover_radius * 2.0
-                    && best.map(|(_, bd)| d < bd).unwrap_or(true)
-                {
+                if d < hover_radius * 2.0 && best.map(|(_, bd)| d < bd).unwrap_or(true) {
                     best = Some((idx, d));
                 }
             }
@@ -305,10 +328,9 @@ pub fn point_curve_widget(ui: &mut egui::Ui, curve: &mut chalkraw_core::Curve) -
                     new_p.x = 1.0;
                 } else {
                     // Middle points: prevent crossing neighbours.
-                    new_p.x = new_p.x.clamp(
-                        curve.0[idx - 1].x + 0.01,
-                        curve.0[idx + 1].x - 0.01,
-                    );
+                    new_p.x = new_p
+                        .x
+                        .clamp(curve.0[idx - 1].x + 0.01, curve.0[idx + 1].x - 0.01);
                 }
                 curve.0[idx] = new_p;
                 changed = true;
@@ -324,9 +346,9 @@ pub fn point_curve_widget(ui: &mut egui::Ui, curve: &mut chalkraw_core::Curve) -
             let too_close = curve.0.iter().any(|p| (p.x - cp.x).abs() < 0.02);
             if !too_close {
                 curve.0.push(cp);
-                curve.0.sort_by(|a, b| {
-                    a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal)
-                });
+                curve
+                    .0
+                    .sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
                 changed = true;
             }
         }
@@ -365,19 +387,13 @@ pub fn left_panel(ui: &mut Ui, state: &mut crate::app::AppState) -> bool {
     ui.separator();
     ui.label("Folders");
     ui.indent("folders", |ui| {
-        let folder_summary = match state.catalog.list_photos() {
-            Ok(photos) => {
-                let mut counts: std::collections::BTreeMap<std::path::PathBuf, usize> =
-                    std::collections::BTreeMap::new();
-                for p in &photos {
-                    if let Some(parent) = p.original_path.parent() {
-                        *counts.entry(parent.to_path_buf()).or_insert(0) += 1;
-                    }
-                }
-                counts
+        let mut folder_summary: std::collections::BTreeMap<std::path::PathBuf, usize> =
+            std::collections::BTreeMap::new();
+        for p in &state.photos_cache {
+            if let Some(parent) = p.original_path.parent() {
+                *folder_summary.entry(parent.to_path_buf()).or_insert(0) += 1;
             }
-            Err(_) => Default::default(),
-        };
+        }
         if folder_summary.is_empty() {
             ui.label("(no photos imported yet)");
         } else {
@@ -470,15 +486,20 @@ pub fn left_panel(ui: &mut Ui, state: &mut crate::app::AppState) -> bool {
     changed
 }
 
-pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
+pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
     let mut changed = false;
+    let before_tone_curve = edit.tone_curve.rgb.clone();
+    let before_sharpening_radius = edit.detail.sharpening.radius;
+    let before_noise_reduction = edit.detail.noise_reduction;
 
     ui.heading("Develop");
     ui.separator();
 
     egui::CollapsingHeader::new("Histogram")
         .default_open(false)
-        .show(ui, |ui| { ui.label("(Phase 2)"); });
+        .show(ui, |ui| {
+            ui.label("(Phase 2)");
+        });
 
     // ── Basic ────────────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("Basic")
@@ -487,7 +508,11 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
             // White Balance — shown first, matching Lightroom order.
             ui.label("Temp (K)");
             changed |= slider_scroll_suffix(
-                ui, &mut edit.white_balance.temp_kelvin, 2000.0..=10000.0, 0, " K",
+                ui,
+                &mut edit.white_balance.temp_kelvin,
+                2000.0..=10000.0,
+                0,
+                " K",
             );
 
             ui.label("Tint");
@@ -519,11 +544,17 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
         .default_open(false)
         .show(ui, |ui| {
             ui.label("Texture");
-            if slider_scroll(ui, &mut edit.presence.texture, -100.0..=100.0, 0) { changed = true; }
+            if slider_scroll(ui, &mut edit.presence.texture, -100.0..=100.0, 0) {
+                changed = true;
+            }
             ui.label("Clarity");
-            if slider_scroll(ui, &mut edit.presence.clarity, -100.0..=100.0, 0) { changed = true; }
+            if slider_scroll(ui, &mut edit.presence.clarity, -100.0..=100.0, 0) {
+                changed = true;
+            }
             ui.label("Dehaze");
-            if slider_scroll(ui, &mut edit.presence.dehaze, -100.0..=100.0, 0) { changed = true; }
+            if slider_scroll(ui, &mut edit.presence.dehaze, -100.0..=100.0, 0) {
+                changed = true;
+            }
         });
 
     // ── Color ─────────────────────────────────────────────────────────────────
@@ -546,13 +577,21 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
                 .default_open(true)
                 .show(ui, |ui| {
                     ui.label("Highlights");
-                    if slider_scroll(ui, &mut edit.parametric_curve.highlights, -100.0..=100.0, 0) { changed = true; }
+                    if slider_scroll(ui, &mut edit.parametric_curve.highlights, -100.0..=100.0, 0) {
+                        changed = true;
+                    }
                     ui.label("Lights");
-                    if slider_scroll(ui, &mut edit.parametric_curve.lights, -100.0..=100.0, 0) { changed = true; }
+                    if slider_scroll(ui, &mut edit.parametric_curve.lights, -100.0..=100.0, 0) {
+                        changed = true;
+                    }
                     ui.label("Darks");
-                    if slider_scroll(ui, &mut edit.parametric_curve.darks, -100.0..=100.0, 0) { changed = true; }
+                    if slider_scroll(ui, &mut edit.parametric_curve.darks, -100.0..=100.0, 0) {
+                        changed = true;
+                    }
                     ui.label("Shadows");
-                    if slider_scroll(ui, &mut edit.parametric_curve.shadows, -100.0..=100.0, 0) { changed = true; }
+                    if slider_scroll(ui, &mut edit.parametric_curve.shadows, -100.0..=100.0, 0) {
+                        changed = true;
+                    }
                 });
             egui::CollapsingHeader::new("Point Curve")
                 .id_salt("tc_point")
@@ -573,13 +612,13 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
         .default_open(false)
         .show(ui, |ui| {
             let names: [(&str, egui::Color32); 8] = [
-                ("Red",     egui::Color32::from_rgb(220, 60, 60)),
-                ("Orange",  egui::Color32::from_rgb(230, 140, 50)),
-                ("Yellow",  egui::Color32::from_rgb(230, 220, 50)),
-                ("Green",   egui::Color32::from_rgb(80, 200, 80)),
-                ("Aqua",    egui::Color32::from_rgb(80, 200, 220)),
-                ("Blue",    egui::Color32::from_rgb(80, 120, 230)),
-                ("Purple",  egui::Color32::from_rgb(160, 80, 230)),
+                ("Red", egui::Color32::from_rgb(220, 60, 60)),
+                ("Orange", egui::Color32::from_rgb(230, 140, 50)),
+                ("Yellow", egui::Color32::from_rgb(230, 220, 50)),
+                ("Green", egui::Color32::from_rgb(80, 200, 80)),
+                ("Aqua", egui::Color32::from_rgb(80, 200, 220)),
+                ("Blue", egui::Color32::from_rgb(80, 120, 230)),
+                ("Purple", egui::Color32::from_rgb(160, 80, 230)),
                 ("Magenta", egui::Color32::from_rgb(220, 80, 200)),
             ];
             for (i, (name, swatch)) in names.iter().enumerate() {
@@ -609,29 +648,69 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
         .default_open(false)
         .show(ui, |ui| {
             ui.label("Shadows");
-            if color_wheel_widget(ui, &mut edit.color_grading.shadows) { changed = true; }
+            if color_wheel_widget(ui, &mut edit.color_grading.shadows) {
+                changed = true;
+            }
             ui.label("Shadows Luminance");
-            if slider_scroll(ui, &mut edit.color_grading.shadows.luminance, -100.0..=100.0, 0) { changed = true; }
+            if slider_scroll(
+                ui,
+                &mut edit.color_grading.shadows.luminance,
+                -100.0..=100.0,
+                0,
+            ) {
+                changed = true;
+            }
             ui.separator();
             ui.label("Midtones");
-            if color_wheel_widget(ui, &mut edit.color_grading.midtones) { changed = true; }
+            if color_wheel_widget(ui, &mut edit.color_grading.midtones) {
+                changed = true;
+            }
             ui.label("Midtones Luminance");
-            if slider_scroll(ui, &mut edit.color_grading.midtones.luminance, -100.0..=100.0, 0) { changed = true; }
+            if slider_scroll(
+                ui,
+                &mut edit.color_grading.midtones.luminance,
+                -100.0..=100.0,
+                0,
+            ) {
+                changed = true;
+            }
             ui.separator();
             ui.label("Highlights");
-            if color_wheel_widget(ui, &mut edit.color_grading.highlights) { changed = true; }
+            if color_wheel_widget(ui, &mut edit.color_grading.highlights) {
+                changed = true;
+            }
             ui.label("Highlights Luminance");
-            if slider_scroll(ui, &mut edit.color_grading.highlights.luminance, -100.0..=100.0, 0) { changed = true; }
+            if slider_scroll(
+                ui,
+                &mut edit.color_grading.highlights.luminance,
+                -100.0..=100.0,
+                0,
+            ) {
+                changed = true;
+            }
             ui.separator();
             ui.label("Global");
-            if color_wheel_widget(ui, &mut edit.color_grading.global) { changed = true; }
+            if color_wheel_widget(ui, &mut edit.color_grading.global) {
+                changed = true;
+            }
             ui.label("Global Luminance");
-            if slider_scroll(ui, &mut edit.color_grading.global.luminance, -100.0..=100.0, 0) { changed = true; }
+            if slider_scroll(
+                ui,
+                &mut edit.color_grading.global.luminance,
+                -100.0..=100.0,
+                0,
+            ) {
+                changed = true;
+            }
             ui.separator();
             ui.label("Blending");
-            if slider_scroll(ui, &mut edit.color_grading.blending, 0.0..=100.0, 0) { changed = true; }
+            if slider_scroll(ui, &mut edit.color_grading.blending, 0.0..=100.0, 0) {
+                changed = true;
+            }
             ui.label("Balance");
-            if slider_scroll(ui, &mut edit.color_grading.balance, -100.0..=100.0, 0) { changed = true; }
+            if slider_scroll(ui, &mut edit.color_grading.balance, -100.0..=100.0, 0) {
+                changed = true;
+            }
         });
 
     // ── Detail (Phase 2E) ─────────────────────────────────────────────────────
@@ -640,20 +719,37 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
         .show(ui, |ui| {
             ui.strong("Sharpening");
             ui.label("Amount");
-            if slider_scroll(ui, &mut edit.detail.sharpening.amount, 0.0..=150.0, 0) { changed = true; }
+            if slider_scroll(ui, &mut edit.detail.sharpening.amount, 0.0..=150.0, 0) {
+                changed = true;
+            }
             ui.label("Radius");
-            if slider_scroll_suffix(ui, &mut edit.detail.sharpening.radius, 0.5..=3.0, 1, " px") { changed = true; }
+            if slider_scroll_suffix(ui, &mut edit.detail.sharpening.radius, 0.5..=3.0, 1, " px") {
+                changed = true;
+            }
             ui.add_space(4.0);
             ui.label("Detail");
-            if slider_scroll(ui, &mut edit.detail.sharpening.detail, 0.0..=100.0, 0) { changed = true; }
+            if slider_scroll(ui, &mut edit.detail.sharpening.detail, 0.0..=100.0, 0) {
+                changed = true;
+            }
             ui.label("Masking");
-            if slider_scroll(ui, &mut edit.detail.sharpening.masking, 0.0..=100.0, 0) { changed = true; }
+            if slider_scroll(ui, &mut edit.detail.sharpening.masking, 0.0..=100.0, 0) {
+                changed = true;
+            }
             ui.add_space(4.0);
             ui.strong("Noise Reduction");
             ui.label("Noise Reduction Luminance");
-            if slider_scroll(ui, &mut edit.detail.noise_reduction.luminance, 0.0..=100.0, 0) { changed = true; }
+            if slider_scroll(
+                ui,
+                &mut edit.detail.noise_reduction.luminance,
+                0.0..=100.0,
+                0,
+            ) {
+                changed = true;
+            }
             ui.label("Noise Reduction Color");
-            if slider_scroll(ui, &mut edit.detail.noise_reduction.color, 0.0..=100.0, 0) { changed = true; }
+            if slider_scroll(ui, &mut edit.detail.noise_reduction.color, 0.0..=100.0, 0) {
+                changed = true;
+            }
         });
 
     // ── Effects ───────────────────────────────────────────────────────────────
@@ -686,8 +782,7 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
             // effect in Phase 2A. The slider is active so edits are preserved;
             // the tooltip explains the current state.
             let roughness_resp = ui.add(
-                egui::Slider::new(&mut edit.effects.grain.roughness, 0.0..=100.0)
-                    .fixed_decimals(0),
+                egui::Slider::new(&mut edit.effects.grain.roughness, 0.0..=100.0).fixed_decimals(0),
             );
             let roughness_changed = roughness_resp.changed();
             roughness_resp.on_hover_text("Roughness (multi-octave noise — Phase 2E)");
@@ -705,7 +800,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
                         let span = 100.0_f32;
                         let direction = if scroll > 0.0 { 1.0_f32 } else { -1.0 };
                         let step = (scroll.abs() / 50.0).max(0.01) * span * 0.01;
-                        let new_val = (edit.effects.grain.roughness + direction * step).clamp(0.0, 100.0);
+                        let new_val =
+                            (edit.effects.grain.roughness + direction * step).clamp(0.0, 100.0);
                         if (new_val - edit.effects.grain.roughness).abs() > f32::EPSILON {
                             edit.effects.grain.roughness = new_val;
                             changed = true;
@@ -720,9 +816,13 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
         .default_open(false)
         .show(ui, |ui| {
             ui.label("Distortion");
-            if slider_scroll(ui, &mut edit.lens_correction.distortion, -100.0..=100.0, 0) { changed = true; }
+            if slider_scroll(ui, &mut edit.lens_correction.distortion, -100.0..=100.0, 0) {
+                changed = true;
+            }
             ui.label("Vignetting (correction)");
-            if slider_scroll(ui, &mut edit.lens_correction.vignetting, 0.0..=100.0, 0) { changed = true; }
+            if slider_scroll(ui, &mut edit.lens_correction.vignetting, 0.0..=100.0, 0) {
+                changed = true;
+            }
         });
 
     // ── Geometry / Crop (Phase 2F) ────────────────────────────────────────────
@@ -731,30 +831,56 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> bool {
         .show(ui, |ui| {
             let mut enabled = edit.crop.is_some();
             let was_enabled = enabled;
-            if ui.checkbox(&mut enabled, "Crop enabled").changed() { changed = true; }
+            if ui.checkbox(&mut enabled, "Crop enabled").changed() {
+                changed = true;
+            }
             if enabled && !was_enabled {
                 // Initialise default crop to full image so the slider state is sane.
                 edit.crop = Some(chalkraw_core::Crop {
-                    x_pct: 0.0, y_pct: 0.0, w_pct: 1.0, h_pct: 1.0, rotation_deg: 0.0,
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    w_pct: 1.0,
+                    h_pct: 1.0,
+                    rotation_deg: 0.0,
                 });
             } else if !enabled && was_enabled {
                 edit.crop = None;
             }
             if let Some(crop) = edit.crop.as_mut() {
                 ui.label("X");
-                if slider_scroll(ui, &mut crop.x_pct, 0.0..=1.0, 2) { changed = true; }
+                if slider_scroll(ui, &mut crop.x_pct, 0.0..=1.0, 2) {
+                    changed = true;
+                }
                 ui.label("Y");
-                if slider_scroll(ui, &mut crop.y_pct, 0.0..=1.0, 2) { changed = true; }
+                if slider_scroll(ui, &mut crop.y_pct, 0.0..=1.0, 2) {
+                    changed = true;
+                }
                 ui.label("Width");
-                if slider_scroll(ui, &mut crop.w_pct, 0.01..=1.0, 2) { changed = true; }
+                if slider_scroll(ui, &mut crop.w_pct, 0.01..=1.0, 2) {
+                    changed = true;
+                }
                 ui.label("Height");
-                if slider_scroll(ui, &mut crop.h_pct, 0.01..=1.0, 2) { changed = true; }
+                if slider_scroll(ui, &mut crop.h_pct, 0.01..=1.0, 2) {
+                    changed = true;
+                }
                 ui.label("Rotation");
-                if slider_scroll_suffix(ui, &mut crop.rotation_deg, -45.0..=45.0, 1, "°") { changed = true; }
+                if slider_scroll_suffix(ui, &mut crop.rotation_deg, -45.0..=45.0, 1, "°") {
+                    changed = true;
+                }
             }
             ui.add_space(4.0);
             ui.label("Drag-rectangle crop UI — coming with Phase 3 import flow");
         });
 
-    changed
+    if changed {
+        EditChange {
+            uniforms: true,
+            tone_curve: before_tone_curve != edit.tone_curve.rgb,
+            blur_inputs: (before_sharpening_radius - edit.detail.sharpening.radius).abs()
+                > f32::EPSILON
+                || before_noise_reduction != edit.detail.noise_reduction,
+        }
+    } else {
+        EditChange::default()
+    }
 }
