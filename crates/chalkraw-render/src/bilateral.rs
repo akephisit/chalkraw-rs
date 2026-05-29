@@ -8,11 +8,11 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct BilateralUniforms {
     /// Unused (full 2D pass); kept so the layout matches BlurUniforms.
-    pub direction: [f32; 2],   // offset  0
-    pub sigma_spatial: f32,    // offset  8 — spatial Gaussian sigma in pixels
-    pub sigma_range: f32,      // offset 12 — range Gaussian sigma in linear RGB units
-    pub radius: f32,           // offset 16 — half-window size (3 = 7×7)
-    pub _pad: [f32; 3],        // offset 20 — pad to 32 bytes
+    pub direction: [f32; 2], // offset  0
+    pub sigma_spatial: f32, // offset  8 — spatial Gaussian sigma in pixels
+    pub sigma_range: f32,   // offset 12 — range Gaussian sigma in linear RGB units
+    pub radius: f32,        // offset 16 — half-window size (3 = 7×7)
+    pub _pad: [f32; 3],     // offset 20 — pad to 32 bytes
 }
 
 /// GPU bilateral-filter pipeline (single 2D pass, not separable).
@@ -27,78 +27,85 @@ pub struct BilateralPipeline {
 
 impl BilateralPipeline {
     pub fn new(rd: &RenderDevice) -> Self {
-        let shader = rd.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("bilateral.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/bilateral.wgsl").into(),
-            ),
-        });
+        let shader = rd
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("bilateral.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/bilateral.wgsl").into()),
+            });
 
-        let bgl = rd.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("bilateral bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+        let bgl = rd
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("bilateral bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<BilateralUniforms>() as u64,
-                        ),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
                     },
-                    count: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                                BilateralUniforms,
+                            >()
+                                as u64),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let layout = rd
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("bilateral pl"),
+                bind_group_layouts: &[&bgl],
+                push_constant_ranges: &[],
+            });
+
+        let pipeline = rd
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("bilateral pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
                 },
-            ],
-        });
-
-        let layout = rd.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("bilateral pl"),
-            bind_group_layouts: &[&bgl],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = rd.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("bilateral pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
 
         let sampler = rd.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("bilateral sampler"),
@@ -146,7 +153,8 @@ impl BilateralPipeline {
             radius,
             _pad: [0.0; 3],
         };
-        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&u));
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&u));
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bilateral bg"),
@@ -167,9 +175,11 @@ impl BilateralPipeline {
             ],
         });
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("bilateral encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bilateral encoder"),
+            });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bilateral pass"),

@@ -36,7 +36,10 @@ impl RenderDevice {
         let info = adapter.get_info();
         log::info!(
             "RenderDevice selected GPU: {} ({:?}, backend {:?}, vendor 0x{:04X})",
-            info.name, info.device_type, info.backend, info.vendor
+            info.name,
+            info.device_type,
+            info.backend,
+            info.vendor
         );
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -48,7 +51,10 @@ impl RenderDevice {
                 ..Default::default()
             })
             .await?;
-        Ok(Self { device: Arc::new(device), queue: Arc::new(queue) })
+        Ok(Self {
+            device: Arc::new(device),
+            queue: Arc::new(queue),
+        })
     }
 
     /// Wrap an externally-owned device/queue (e.g. from egui-wgpu).

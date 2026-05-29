@@ -12,31 +12,34 @@ pub struct WhiteBalance {
 
 impl Default for WhiteBalance {
     fn default() -> Self {
-        Self { temp_kelvin: 5500.0, tint: 0.0 }
+        Self {
+            temp_kelvin: 5500.0,
+            tint: 0.0,
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct Tone {
-    pub exposure: f32,    // EV stops, identity 0.0, range -5..5
-    pub contrast: f32,    // identity 0.0, range -100..100
-    pub highlights: f32,  // identity 0.0, range -100..100
-    pub shadows: f32,     // identity 0.0, range -100..100
-    pub whites: f32,      // identity 0.0, range -100..100
-    pub blacks: f32,      // identity 0.0, range -100..100
+    pub exposure: f32,   // EV stops, identity 0.0, range -5..5
+    pub contrast: f32,   // identity 0.0, range -100..100
+    pub highlights: f32, // identity 0.0, range -100..100
+    pub shadows: f32,    // identity 0.0, range -100..100
+    pub whites: f32,     // identity 0.0, range -100..100
+    pub blacks: f32,     // identity 0.0, range -100..100
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct Presence {
-    pub texture: f32,     // identity 0.0, range -100..100
-    pub clarity: f32,     // identity 0.0, range -100..100
-    pub dehaze: f32,      // identity 0.0, range -100..100
+    pub texture: f32, // identity 0.0, range -100..100
+    pub clarity: f32, // identity 0.0, range -100..100
+    pub dehaze: f32,  // identity 0.0, range -100..100
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct ColorMix {
-    pub vibrance: f32,    // identity 0.0, range -100..100
-    pub saturation: f32,  // identity 0.0, range -100..100
+    pub vibrance: f32,   // identity 0.0, range -100..100
+    pub saturation: f32, // identity 0.0, range -100..100
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -68,7 +71,7 @@ pub struct ToneCurve {
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct ParametricCurve {
-    pub shadows: f32,    // identity 0, range -100..100
+    pub shadows: f32, // identity 0, range -100..100
     pub darks: f32,
     pub lights: f32,
     pub highlights: f32,
@@ -83,7 +86,14 @@ pub struct HslAdjustment {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum HslColor {
-    Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Aqua,
+    Blue,
+    Purple,
+    Magenta,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -99,8 +109,8 @@ pub struct ColorGrading {
     pub midtones: GradeTone,
     pub highlights: GradeTone,
     pub global: GradeTone,
-    pub blending: f32,   // 0..100, identity 50
-    pub balance: f32,    // -100..100, identity 0
+    pub blending: f32, // 0..100, identity 50
+    pub balance: f32,  // -100..100, identity 0
 }
 
 impl Default for ColorGrading {
@@ -126,7 +136,12 @@ pub struct Sharpening {
 
 impl Default for Sharpening {
     fn default() -> Self {
-        Self { amount: 0.0, radius: 1.0, detail: 25.0, masking: 0.0 }
+        Self {
+            amount: 0.0,
+            radius: 1.0,
+            detail: 25.0,
+            masking: 0.0,
+        }
     }
 }
 
@@ -152,7 +167,12 @@ pub struct Vignette {
 
 impl Default for Vignette {
     fn default() -> Self {
-        Self { amount: 0.0, midpoint: 50.0, feather: 50.0, roundness: 0.0 }
+        Self {
+            amount: 0.0,
+            midpoint: 50.0,
+            feather: 50.0,
+            roundness: 0.0,
+        }
     }
 }
 
@@ -165,7 +185,11 @@ pub struct Grain {
 
 impl Default for Grain {
     fn default() -> Self {
-        Self { amount: 0.0, size: 25.0, roughness: 50.0 }
+        Self {
+            amount: 0.0,
+            size: 25.0,
+            roughness: 50.0,
+        }
     }
 }
 
@@ -184,7 +208,7 @@ pub struct LensCorrection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Crop {
-    pub x_pct: f32,   // 0..1
+    pub x_pct: f32, // 0..1
     pub y_pct: f32,
     pub w_pct: f32,
     pub h_pct: f32,
@@ -313,10 +337,16 @@ impl EditState {
 /// Values outside the range of the first/last control point are clamped to
 /// the first/last y value.
 pub fn interpolate_curve(points: &[CurvePoint], x: f32) -> f32 {
-    if points.is_empty() { return x; }
-    if x <= points[0].x { return points[0].y; }
+    if points.is_empty() {
+        return x;
+    }
+    if x <= points[0].x {
+        return points[0].y;
+    }
     let last = points[points.len() - 1];
-    if x >= last.x { return last.y; }
+    if x >= last.x {
+        return last.y;
+    }
     for i in 0..points.len() - 1 {
         let p1 = points[i];
         let p2 = points[i + 1];
@@ -390,10 +420,16 @@ mod tests {
     fn parametric_curve_change_breaks_identity() {
         let mut s = EditState::default();
         s.parametric_curve.shadows = 50.0;
-        assert!(!s.is_identity(), "parametric_curve change should break identity");
+        assert!(
+            !s.is_identity(),
+            "parametric_curve change should break identity"
+        );
         let mut s2 = EditState::default();
         s2.parametric_curve.highlights = -30.0;
-        assert!(!s2.is_identity(), "parametric_curve highlights change should break identity");
+        assert!(
+            !s2.is_identity(),
+            "parametric_curve highlights change should break identity"
+        );
     }
 
     #[test]
@@ -435,7 +471,13 @@ mod tests {
         let preset = DevelopPreset::from(&original);
 
         let mut target = EditState {
-            crop: Some(Crop { x_pct: 0.1, y_pct: 0.1, w_pct: 0.5, h_pct: 0.5, rotation_deg: 0.0 }),
+            crop: Some(Crop {
+                x_pct: 0.1,
+                y_pct: 0.1,
+                w_pct: 0.5,
+                h_pct: 0.5,
+                rotation_deg: 0.0,
+            }),
             ..EditState::default()
         };
         target.apply_preset(&preset);

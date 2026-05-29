@@ -69,7 +69,11 @@ pub fn rasterise_text(text: &str, px_size: f32, color: [u8; 4]) -> Option<RgbaIm
                 if a == 0 {
                     return;
                 }
-                img.put_pixel(px as u32, py as u32, Rgba([color[0], color[1], color[2], a]));
+                img.put_pixel(
+                    px as u32,
+                    py as u32,
+                    Rgba([color[0], color[1], color[2], a]),
+                );
             });
         }
     }

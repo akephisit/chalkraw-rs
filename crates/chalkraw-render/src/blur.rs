@@ -22,78 +22,86 @@ pub struct BlurPipeline {
 
 impl BlurPipeline {
     pub fn new(rd: &RenderDevice) -> Self {
-        let shader = rd.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("gaussian_blur.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/gaussian_blur.wgsl").into(),
-            ),
-        });
+        let shader = rd
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("gaussian_blur.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../shaders/gaussian_blur.wgsl").into(),
+                ),
+            });
 
-        let bgl = rd.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("blur bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+        let bgl = rd
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("blur bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<BlurUniforms>() as u64,
-                        ),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
                     },
-                    count: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(
+                                std::mem::size_of::<BlurUniforms>() as u64,
+                            ),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let layout = rd
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("blur pl"),
+                bind_group_layouts: &[&bgl],
+                push_constant_ranges: &[],
+            });
+
+        let pipeline = rd
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("blur pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
                 },
-            ],
-        });
-
-        let layout = rd.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("blur pl"),
-            bind_group_layouts: &[&bgl],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = rd.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("blur pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
 
         let sampler = rd.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("blur sampler"),
@@ -141,8 +149,14 @@ impl BlurPipeline {
             [0.0, 1.0 / height as f32]
         };
         let radius = (3.0 * sigma).ceil().max(1.0);
-        let u = BlurUniforms { direction, sigma, radius, _pad: [0.0; 2] };
-        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&u));
+        let u = BlurUniforms {
+            direction,
+            sigma,
+            radius,
+            _pad: [0.0; 2],
+        };
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&u));
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("blur bg"),
@@ -163,9 +177,11 @@ impl BlurPipeline {
             ],
         });
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("blur encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("blur encoder"),
+            });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("blur pass"),
@@ -196,10 +212,19 @@ pub fn create_pingpong(
     rd: &RenderDevice,
     width: u32,
     height: u32,
-) -> (wgpu::Texture, wgpu::TextureView, wgpu::Texture, wgpu::TextureView) {
+) -> (
+    wgpu::Texture,
+    wgpu::TextureView,
+    wgpu::Texture,
+    wgpu::TextureView,
+) {
     let desc = wgpu::TextureDescriptor {
         label: Some("pingpong"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,

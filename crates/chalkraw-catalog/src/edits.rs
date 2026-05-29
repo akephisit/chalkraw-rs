@@ -38,7 +38,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("t.chalkraw");
         let cat = Catalog::open_or_create(&path, "t").unwrap();
-        let p = Photo::new(PathBuf::from("/x/a.jpg"), [0u8; 32], 1, 1, ImageFormat::Jpeg);
+        let p = Photo::new(
+            PathBuf::from("/x/a.jpg"),
+            [0u8; 32],
+            1,
+            1,
+            ImageFormat::Jpeg,
+        );
         let e = cat.get_edit(p.id).unwrap();
         assert!(e.is_identity());
     }
@@ -48,7 +54,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("t.chalkraw");
         let cat = Catalog::open_or_create(&path, "t").unwrap();
-        let p = Photo::new(PathBuf::from("/x/a.jpg"), [0u8; 32], 1, 1, ImageFormat::Jpeg);
+        let p = Photo::new(
+            PathBuf::from("/x/a.jpg"),
+            [0u8; 32],
+            1,
+            1,
+            ImageFormat::Jpeg,
+        );
         cat.insert_photo(&p).unwrap();
         let mut e = EditState::default();
         e.tone.exposure = 1.25;

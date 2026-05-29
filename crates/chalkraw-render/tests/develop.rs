@@ -5,9 +5,9 @@
 /// skip gracefully when no GPU adapter is available (CI / sandbox).
 use chalkraw_core::{Crop, EditState};
 use chalkraw_render::{
-    create_pingpong, make_identity_lut, make_identity_3d_lut, make_target, read_to_cpu,
-    BilateralPipeline, BlurPipeline, DevelopPipeline, EditUniforms, PipelineConfig,
-    RenderDevice, SourceTexture,
+    create_pingpong, make_identity_3d_lut, make_identity_lut, make_target, read_to_cpu,
+    BilateralPipeline, BlurPipeline, DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice,
+    SourceTexture,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -29,7 +29,9 @@ fn render_solid(rd: &RenderDevice, w: u32, h: u32, pixels: Vec<f32>, edit: &Edit
     // Pass identity 3D LUT for display profile (no effect when display_lut_active=0).
     let (_lut_tex, lut_view) = make_identity_lut(rd);
     let (_dlut_tex, dlut_view) = make_identity_3d_lut(rd);
-    let bg = pipe.make_bind_group(&src, &src.view, &src.view, &src.view, &src.view, &lut_view, &dlut_view);
+    let bg = pipe.make_bind_group(
+        &src, &src.view, &src.view, &src.view, &src.view, &lut_view, &dlut_view,
+    );
     let (tex, view) = make_target(rd, w, h);
     pipe.render(&view, &bg);
     read_to_cpu(rd, &tex, w, h).unwrap()
@@ -47,7 +49,10 @@ fn pixel_at(buf: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
 fn contrast_plus_50_pushes_value_away_from_midgrey() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (16, 16);
     let mut edit = EditState::default();
@@ -62,7 +67,10 @@ fn contrast_plus_50_pushes_value_away_from_midgrey() {
     let p = pixel_at(&pixels, w, 8, 8);
 
     // 0.7 is above 0.5 pivot, so +contrast should make it brighter (higher byte).
-    assert!(p[0] > base_p[0], "contrast +50 should brighten pixel above midgrey; got {p:?} vs base {base_p:?}");
+    assert!(
+        p[0] > base_p[0],
+        "contrast +50 should brighten pixel above midgrey; got {p:?} vs base {base_p:?}"
+    );
 }
 
 /// +50 shadows on a 0.2-grey pixel should brighten it.
@@ -70,7 +78,10 @@ fn contrast_plus_50_pushes_value_away_from_midgrey() {
 fn shadows_plus_50_brightens_dark_pixels() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (16, 16);
     let mut edit = EditState::default();
@@ -83,7 +94,10 @@ fn shadows_plus_50_brightens_dark_pixels() {
     let pixels = render_solid(&rd, w, h, solid_grey(w, h, 0.2), &edit);
     let p = pixel_at(&pixels, w, 8, 8);
 
-    assert!(p[0] > base_p[0], "shadows +50 should brighten dark pixel; got {p:?} vs base {base_p:?}");
+    assert!(
+        p[0] > base_p[0],
+        "shadows +50 should brighten dark pixel; got {p:?} vs base {base_p:?}"
+    );
 }
 
 /// Warm white balance (7500 K > 5500 K neutral) should shift red up and blue down.
@@ -91,7 +105,10 @@ fn shadows_plus_50_brightens_dark_pixels() {
 fn wb_warm_shifts_red_up_blue_down() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (16, 16);
     let mut edit = EditState::default();
@@ -101,7 +118,12 @@ fn wb_warm_shifts_red_up_blue_down() {
     let p = pixel_at(&pixels, w, 8, 8);
 
     // R should be brighter than B on a warm tint.
-    assert!(p[0] > p[2], "warm WB should have R > B; got R={} B={}", p[0], p[2]);
+    assert!(
+        p[0] > p[2],
+        "warm WB should have R > B; got R={} B={}",
+        p[0],
+        p[2]
+    );
 }
 
 /// -100 saturation on a solid red pixel should produce equal R=G=B (grey).
@@ -109,7 +131,10 @@ fn wb_warm_shifts_red_up_blue_down() {
 fn saturation_minus_100_produces_grey() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (16, 16);
     let mut edit = EditState::default();
@@ -123,8 +148,14 @@ fn saturation_minus_100_produces_grey() {
     // Allow ±4 byte tolerance for sRGB conversion rounding.
     let diff_rg = (p[0] as i32 - p[1] as i32).unsigned_abs();
     let diff_rb = (p[0] as i32 - p[2] as i32).unsigned_abs();
-    assert!(diff_rg <= 4, "saturation -100 should equalise R and G; diff={diff_rg}, p={p:?}");
-    assert!(diff_rb <= 4, "saturation -100 should equalise R and B; diff={diff_rb}, p={p:?}");
+    assert!(
+        diff_rg <= 4,
+        "saturation -100 should equalise R and G; diff={diff_rg}, p={p:?}"
+    );
+    assert!(
+        diff_rb <= 4,
+        "saturation -100 should equalise R and B; diff={diff_rb}, p={p:?}"
+    );
 }
 
 /// -100 vignette amount should darken the corner pixel relative to the centre.
@@ -132,7 +163,10 @@ fn saturation_minus_100_produces_grey() {
 fn vignette_minus_100_darkens_corners() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (32, 32);
     let mut edit = EditState::default();
@@ -147,8 +181,12 @@ fn vignette_minus_100_darkens_corners() {
     let centre = pixel_at(&pixels, w, 16, 16);
     let corner = pixel_at(&pixels, w, 0, 0);
 
-    assert!(corner[0] < centre[0],
-        "vignette -100 should darken corner vs centre; corner={} centre={}", corner[0], centre[0]);
+    assert!(
+        corner[0] < centre[0],
+        "vignette -100 should darken corner vs centre; corner={} centre={}",
+        corner[0],
+        centre[0]
+    );
 }
 
 /// Grain amount=50 on a uniform grey should introduce per-pixel variation
@@ -157,7 +195,10 @@ fn vignette_minus_100_darkens_corners() {
 fn grain_amount_50_introduces_variation() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (32, 32);
     let mut edit = EditState::default();
@@ -169,8 +210,11 @@ fn grain_amount_50_introduces_variation() {
     // With grain, not all pixels should be identical. Collect unique R values.
     let unique_r: std::collections::HashSet<u8> =
         (0..w * h).map(|i| pixels[(i * 4) as usize]).collect();
-    assert!(unique_r.len() > 1,
-        "grain should introduce per-pixel variation; all pixels had same R={:?}", unique_r);
+    assert!(
+        unique_r.len() > 1,
+        "grain should introduce per-pixel variation; all pixels had same R={:?}",
+        unique_r
+    );
 }
 
 /// HSL red hue shift: solid red input with hsl[0].hue=50 should rotate the
@@ -179,7 +223,10 @@ fn grain_amount_50_introduces_variation() {
 fn hsl_red_hue_shift_rotates_red() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (16, 16);
 
@@ -207,7 +254,10 @@ fn hsl_red_hue_shift_rotates_red() {
 fn hsl_blue_saturation_minus_100_desaturates_only_blue() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (16, 16);
 
@@ -239,11 +289,14 @@ fn hsl_blue_saturation_minus_100_desaturates_only_blue() {
 fn cg_shadows_blue_tints_dark_pixels() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (16, 16);
     let mut edit = EditState::default();
-    edit.color_grading.shadows.hue = 240.0;        // blue
+    edit.color_grading.shadows.hue = 240.0; // blue
     edit.color_grading.shadows.saturation = 100.0;
 
     let pixels = render_solid(&rd, w, h, solid_grey(w, h, 0.2), &edit);
@@ -252,7 +305,9 @@ fn cg_shadows_blue_tints_dark_pixels() {
     assert!(
         p[2] > p[0],
         "cg shadows blue tint on dark pixel should produce B > R; got R={} G={} B={}",
-        p[0], p[1], p[2]
+        p[0],
+        p[1],
+        p[2]
     );
 }
 
@@ -262,11 +317,14 @@ fn cg_shadows_blue_tints_dark_pixels() {
 fn cg_highlights_yellow_tints_light_pixels() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (16, 16);
     let mut edit = EditState::default();
-    edit.color_grading.highlights.hue = 60.0;        // yellow
+    edit.color_grading.highlights.hue = 60.0; // yellow
     edit.color_grading.highlights.saturation = 100.0;
 
     let pixels = render_solid(&rd, w, h, solid_grey(w, h, 0.8), &edit);
@@ -277,7 +335,9 @@ fn cg_highlights_yellow_tints_light_pixels() {
     assert!(
         rg_sum > b * 2,
         "cg highlights yellow tint on light pixel should produce R+G > B; got R={} G={} B={}",
-        p[0], p[1], p[2]
+        p[0],
+        p[1],
+        p[2]
     );
 }
 
@@ -286,7 +346,10 @@ fn cg_highlights_yellow_tints_light_pixels() {
 fn cg_global_lum_minus_50_darkens_all() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (16, 16);
 
@@ -302,7 +365,8 @@ fn cg_global_lum_minus_50_darkens_all() {
     assert!(
         p[0] < base_p[0],
         "cg global luminance -50 should darken pixel; got {} (was {})",
-        p[0], base_p[0]
+        p[0],
+        base_p[0]
     );
 }
 
@@ -311,7 +375,10 @@ fn cg_global_lum_minus_50_darkens_all() {
 fn parametric_shadows_plus_50_lifts_dark_pixels() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (16, 16);
 
@@ -335,7 +402,10 @@ fn parametric_shadows_plus_50_lifts_dark_pixels() {
 fn parametric_highlights_minus_50_dims_bright_pixels() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (16, 16);
 
@@ -363,7 +433,10 @@ fn parametric_highlights_minus_50_dims_bright_pixels() {
 fn lens_distortion_positive_keeps_centre_unchanged() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (32, 32);
     let grey_val = 0.5_f32;
@@ -391,7 +464,10 @@ fn lens_distortion_positive_keeps_centre_unchanged() {
 fn lens_vignetting_brightens_corner() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (32, 32);
 
@@ -406,7 +482,8 @@ fn lens_vignetting_brightens_corner() {
     assert!(
         corner[0] > centre[0],
         "lens vignetting correction 100 should brighten corner vs centre; corner={} centre={}",
-        corner[0], centre[0]
+        corner[0],
+        centre[0]
     );
 }
 
@@ -422,18 +499,27 @@ fn lens_vignetting_brightens_corner() {
 fn crop_enabled_top_left_quadrant_samples_correct_region() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (32u32, 32u32);
 
     // Build a source where the top-left quadrant is dark (0.2) and the
     // bottom-right quadrant is bright (0.8). The other two quadrants are 0.5.
-    let source: Vec<f32> = (0..w * h).flat_map(|i| {
-        let px = i % w;
-        let py = i / w;
-        let v = if px < w / 2 && py < h / 2 { 0.2_f32 } else { 0.8_f32 };
-        [v, v, v, 1.0_f32]
-    }).collect();
+    let source: Vec<f32> = (0..w * h)
+        .flat_map(|i| {
+            let px = i % w;
+            let py = i / w;
+            let v = if px < w / 2 && py < h / 2 {
+                0.2_f32
+            } else {
+                0.8_f32
+            };
+            [v, v, v, 1.0_f32]
+        })
+        .collect();
 
     // Baseline: no crop, output centre maps to source (0.5, 0.5) → bright region.
     let base_edit = EditState::default();
@@ -442,7 +528,13 @@ fn crop_enabled_top_left_quadrant_samples_correct_region() {
 
     // With crop: top-left quadrant only. Output centre → source (0.25, 0.25) → dark region.
     let edit = EditState {
-        crop: Some(Crop { x_pct: 0.0, y_pct: 0.0, w_pct: 0.5, h_pct: 0.5, rotation_deg: 0.0 }),
+        crop: Some(Crop {
+            x_pct: 0.0,
+            y_pct: 0.0,
+            w_pct: 0.5,
+            h_pct: 0.5,
+            rotation_deg: 0.0,
+        }),
         ..EditState::default()
     };
     let crop_pixels = render_solid(&rd, w, h, source, &edit);
@@ -451,7 +543,8 @@ fn crop_enabled_top_left_quadrant_samples_correct_region() {
     assert!(
         crop_centre[0] < base_centre[0],
         "crop top-left quadrant: centre should sample dark region (R={}) vs no-crop bright (R={})",
-        crop_centre[0], base_centre[0]
+        crop_centre[0],
+        base_centre[0]
     );
 }
 
@@ -466,7 +559,10 @@ fn crop_enabled_top_left_quadrant_samples_correct_region() {
 fn manual_srgb_encoding_matches_hardware_encoding() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skip: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skip: no GPU");
+            return;
+        }
     };
     let w: u32 = 16;
     let h: u32 = 16;
@@ -474,37 +570,66 @@ fn manual_srgb_encoding_matches_hardware_encoding() {
     let edit = EditState::default();
 
     // ── hardware sRGB path ────────────────────────────────────────────────────
-    let pipe_hw = DevelopPipeline::new(&rd, PipelineConfig {
-        output_format: wgpu::TextureFormat::Rgba8UnormSrgb,
-    });
+    let pipe_hw = DevelopPipeline::new(
+        &rd,
+        PipelineConfig {
+            output_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        },
+    );
     pipe_hw.update_uniforms(&EditUniforms::from(&edit));
     let src_hw = SourceTexture::upload(&rd, w, h, &pixels);
     // Pass source.view for all blur views (Clarity/Sharpening/Texture/NR not exercised).
     // Pass identity LUT for tone curve (no effect). Pass identity 3D LUT for display profile.
     let (_lut_hw, lut_view_hw) = make_identity_lut(&rd);
     let (_dlut_hw, dlut_view_hw) = make_identity_3d_lut(&rd);
-    let bg_hw = pipe_hw.make_bind_group(&src_hw, &src_hw.view, &src_hw.view, &src_hw.view, &src_hw.view, &lut_view_hw, &dlut_view_hw);
+    let bg_hw = pipe_hw.make_bind_group(
+        &src_hw,
+        &src_hw.view,
+        &src_hw.view,
+        &src_hw.view,
+        &src_hw.view,
+        &lut_view_hw,
+        &dlut_view_hw,
+    );
     let (tex_hw, view_hw) = make_target(&rd, w, h);
     pipe_hw.render(&view_hw, &bg_hw);
     let out_hw = read_to_cpu(&rd, &tex_hw, w, h).unwrap();
 
     // ── manual sRGB path (Rgba8Unorm, shader encodes) ─────────────────────────
-    let pipe_sw = DevelopPipeline::new(&rd, PipelineConfig {
-        output_format: wgpu::TextureFormat::Rgba8Unorm,
-    });
+    let pipe_sw = DevelopPipeline::new(
+        &rd,
+        PipelineConfig {
+            output_format: wgpu::TextureFormat::Rgba8Unorm,
+        },
+    );
     // Verify the flag was set correctly.
-    assert!(pipe_sw.manual_srgb_needed, "pipeline with Rgba8Unorm should set manual_srgb_needed");
+    assert!(
+        pipe_sw.manual_srgb_needed,
+        "pipeline with Rgba8Unorm should set manual_srgb_needed"
+    );
 
     pipe_sw.update_uniforms(&EditUniforms::from(&edit));
     let src_sw = SourceTexture::upload(&rd, w, h, &pixels);
     let (_lut_sw, lut_view_sw) = make_identity_lut(&rd);
     let (_dlut_sw, dlut_view_sw) = make_identity_3d_lut(&rd);
-    let bg_sw = pipe_sw.make_bind_group(&src_sw, &src_sw.view, &src_sw.view, &src_sw.view, &src_sw.view, &lut_view_sw, &dlut_view_sw);
+    let bg_sw = pipe_sw.make_bind_group(
+        &src_sw,
+        &src_sw.view,
+        &src_sw.view,
+        &src_sw.view,
+        &src_sw.view,
+        &lut_view_sw,
+        &dlut_view_sw,
+    );
 
     // Create a non-sRGB render target manually (make_target always uses Rgba8UnormSrgb).
     let target_sw = rd.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("readback target non-srgb"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -524,7 +649,8 @@ fn manual_srgb_encoding_matches_hardware_encoding() {
         assert!(
             diff <= 2,
             "channel {c} differs: hw={} sw={} (manual sRGB should match hardware sRGB within ±2)",
-            center_hw[c], center_sw[c]
+            center_hw[c],
+            center_sw[c]
         );
     }
 }
@@ -535,7 +661,10 @@ fn manual_srgb_encoding_matches_hardware_encoding() {
 fn vibrance_boosts_low_saturation_colors() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let (w, h) = (16, 16);
 
@@ -568,16 +697,25 @@ fn vibrance_boosts_low_saturation_colors() {
 fn sharpening_amount_100_changes_high_freq_edges() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skip: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skip: no GPU");
+            return;
+        }
     };
     let w: u32 = 32;
     let h: u32 = 32;
     // Vertical stripes with sharp transitions every other pixel.
-    let pixels: Vec<f32> = (0..w * h).flat_map(|i: u32| {
-        let x = i % w;
-        let v = if x.is_multiple_of(2) { 0.4_f32 } else { 0.6_f32 };
-        [v, v, v, 1.0_f32]
-    }).collect();
+    let pixels: Vec<f32> = (0..w * h)
+        .flat_map(|i: u32| {
+            let x = i % w;
+            let v = if x.is_multiple_of(2) {
+                0.4_f32
+            } else {
+                0.6_f32
+            };
+            [v, v, v, 1.0_f32]
+        })
+        .collect();
 
     let source = SourceTexture::upload(&rd, w, h, &pixels);
     let blur = BlurPipeline::new(&rd);
@@ -593,7 +731,15 @@ fn sharpening_amount_100_changes_high_freq_edges() {
     // Pass identity LUT for tone curve (no effect). Pass identity 3D LUT for display profile.
     let (_lut_tex, lut_view) = make_identity_lut(&rd);
     let (_dlut_tex, dlut_view) = make_identity_3d_lut(&rd);
-    let bind = pipe.make_bind_group(&source, &clar_b, &sharp_b, &source.view, &source.view, &lut_view, &dlut_view);
+    let bind = pipe.make_bind_group(
+        &source,
+        &clar_b,
+        &sharp_b,
+        &source.view,
+        &source.view,
+        &lut_view,
+        &dlut_view,
+    );
 
     // Render with sharpening amount = 100.
     let mut edit = EditState::default();
@@ -632,16 +778,21 @@ fn sharpening_amount_100_changes_high_freq_edges() {
 fn clarity_plus_50_increases_contrast_on_textured_image() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skip: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skip: no GPU");
+            return;
+        }
     };
     let w: u32 = 32;
     let h: u32 = 32;
     // Build a source with alternating bright/dark vertical stripes — high local contrast.
-    let pixels: Vec<f32> = (0..w * h).flat_map(|i: u32| {
-        let x = i % w;
-        let v = if x % 4 < 2 { 0.7_f32 } else { 0.3_f32 };
-        [v, v, v, 1.0_f32]
-    }).collect();
+    let pixels: Vec<f32> = (0..w * h)
+        .flat_map(|i: u32| {
+            let x = i % w;
+            let v = if x % 4 < 2 { 0.7_f32 } else { 0.3_f32 };
+            [v, v, v, 1.0_f32]
+        })
+        .collect();
 
     let source = SourceTexture::upload(&rd, w, h, &pixels);
     let blur = BlurPipeline::new(&rd);
@@ -654,7 +805,15 @@ fn clarity_plus_50_increases_contrast_on_textured_image() {
     // Pass identity LUT for tone curve (no effect). Pass identity 3D LUT for display profile.
     let (_lut_tex, lut_view) = make_identity_lut(&rd);
     let (_dlut_tex, dlut_view) = make_identity_3d_lut(&rd);
-    let bind = pipe.make_bind_group(&source, &blur_view_b, &source.view, &source.view, &source.view, &lut_view, &dlut_view);
+    let bind = pipe.make_bind_group(
+        &source,
+        &blur_view_b,
+        &source.view,
+        &source.view,
+        &source.view,
+        &lut_view,
+        &dlut_view,
+    );
 
     // Render with clarity = 50.
     let mut edit = EditState::default();
@@ -692,17 +851,26 @@ fn clarity_plus_50_increases_contrast_on_textured_image() {
 fn texture_amount_50_changes_mid_freq_pattern() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skip: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skip: no GPU");
+            return;
+        }
     };
     let w: u32 = 32;
     let h: u32 = 32;
     // Mid-frequency stripes (period 6) — distinct from Clarity's large patches
     // and Sharpening's pixel-level edges.
-    let pixels: Vec<f32> = (0..w * h).flat_map(|i: u32| {
-        let x = i % w;
-        let v = if (x / 3).is_multiple_of(2) { 0.7_f32 } else { 0.3_f32 };
-        [v, v, v, 1.0_f32]
-    }).collect();
+    let pixels: Vec<f32> = (0..w * h)
+        .flat_map(|i: u32| {
+            let x = i % w;
+            let v = if (x / 3).is_multiple_of(2) {
+                0.7_f32
+            } else {
+                0.3_f32
+            };
+            [v, v, v, 1.0_f32]
+        })
+        .collect();
 
     let source = SourceTexture::upload(&rd, w, h, &pixels);
     let blur = BlurPipeline::new(&rd);
@@ -721,7 +889,15 @@ fn texture_amount_50_changes_mid_freq_pattern() {
     // Pass identity LUT for tone curve (no effect). Pass identity 3D LUT for display profile.
     let (_lut_tex, lut_view) = make_identity_lut(&rd);
     let (_dlut_tex, dlut_view) = make_identity_3d_lut(&rd);
-    let bind = pipe.make_bind_group(&source, &c_b, &s_b, &t_b, &source.view, &lut_view, &dlut_view);
+    let bind = pipe.make_bind_group(
+        &source,
+        &c_b,
+        &s_b,
+        &t_b,
+        &source.view,
+        &lut_view,
+        &dlut_view,
+    );
 
     let mut edit = EditState::default();
     edit.presence.texture = 50.0;
@@ -755,20 +931,25 @@ fn texture_amount_50_changes_mid_freq_pattern() {
 fn nr_luminance_100_smooths_noisy_source() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skip: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skip: no GPU");
+            return;
+        }
     };
     let w: u32 = 32;
     let h: u32 = 32;
     // Deterministic noise pattern around 0.5 grey using a multiplicative hash.
-    let pixels: Vec<f32> = (0..w * h).flat_map(|i: u32| {
-        let mut x = i.wrapping_mul(2654435761);
-        x ^= x >> 16;
-        x = x.wrapping_mul(2246822507);
-        x ^= x >> 13;
-        let n = (x as f32 / u32::MAX as f32 - 0.5) * 0.4;
-        let v = (0.5 + n).clamp(0.0, 1.0);
-        [v, v, v, 1.0]
-    }).collect();
+    let pixels: Vec<f32> = (0..w * h)
+        .flat_map(|i: u32| {
+            let mut x = i.wrapping_mul(2654435761);
+            x ^= x >> 16;
+            x = x.wrapping_mul(2246822507);
+            x ^= x >> 13;
+            let n = (x as f32 / u32::MAX as f32 - 0.5) * 0.4;
+            let v = (0.5 + n).clamp(0.0, 1.0);
+            [v, v, v, 1.0]
+        })
+        .collect();
 
     let source = SourceTexture::upload(&rd, w, h, &pixels);
     let blur = BlurPipeline::new(&rd);
@@ -822,7 +1003,7 @@ fn nr_luminance_100_smooths_noisy_source() {
     }
 
     let var_off = variance(&pixels_off, w, h);
-    let var_on  = variance(&pixels_on,  w, h);
+    let var_on = variance(&pixels_on, w, h);
     assert!(
         var_on < var_off * 0.8,
         "NR luminance=100 should reduce variance by at least 20%: off={var_off:.2} on={var_on:.2}"
@@ -838,29 +1019,34 @@ fn nr_luminance_100_smooths_noisy_source() {
 fn dehaze_positive_increases_contrast_on_hazy_pattern() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skip: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skip: no GPU");
+            return;
+        }
     };
     let w = 32;
     let h = 32;
     // Simulate haze: low contrast around midgrey with a faint pattern.
-    let pixels: Vec<f32> = (0..w * h).flat_map(|i: u32| {
-        let x = i % w;
-        let v = if x < w / 2 { 0.45 } else { 0.55 };
-        [v, v, v, 1.0]
-    }).collect();
+    let pixels: Vec<f32> = (0..w * h)
+        .flat_map(|i: u32| {
+            let x = i % w;
+            let v = if x < w / 2 { 0.45 } else { 0.55 };
+            [v, v, v, 1.0]
+        })
+        .collect();
     let source = SourceTexture::upload(&rd, w, h, &pixels);
     let blur = BlurPipeline::new(&rd);
     let (_, c_a, _, c_b) = create_pingpong(&rd, w, h);
     let (_, s_a, _, s_b) = create_pingpong(&rd, w, h);
     let (_, t_a, _, t_b) = create_pingpong(&rd, w, h);
     let (_, n_a, _, n_b) = create_pingpong(&rd, w, h);
-    blur.render_pass(&source.view, &c_a, w, h, true,  16.0);
+    blur.render_pass(&source.view, &c_a, w, h, true, 16.0);
     blur.render_pass(&c_a, &c_b, w, h, false, 16.0);
-    blur.render_pass(&source.view, &s_a, w, h, true,  1.5);
+    blur.render_pass(&source.view, &s_a, w, h, true, 1.5);
     blur.render_pass(&s_a, &s_b, w, h, false, 1.5);
-    blur.render_pass(&source.view, &t_a, w, h, true,  5.0);
+    blur.render_pass(&source.view, &t_a, w, h, true, 5.0);
     blur.render_pass(&t_a, &t_b, w, h, false, 5.0);
-    blur.render_pass(&source.view, &n_a, w, h, true,  2.0);
+    blur.render_pass(&source.view, &n_a, w, h, true, 2.0);
     blur.render_pass(&n_a, &n_b, w, h, false, 2.0);
     let pipe = DevelopPipeline::new(&rd, PipelineConfig::default());
     // Pass identity LUT for tone curve (no effect). Pass identity 3D LUT for display profile.
@@ -882,13 +1068,16 @@ fn dehaze_positive_increases_contrast_on_hazy_pattern() {
     let on = read_to_cpu(&rd, &tex_on, w, h).unwrap();
 
     // Light half should brighten or darken further; dark half similarly. Verify span widens.
-    let center_left  = off[((16 * w + 8) * 4) as usize];
+    let center_left = off[((16 * w + 8) * 4) as usize];
     let center_right = off[((16 * w + 24) * 4) as usize];
     let span_off = (center_right as i32 - center_left as i32).abs();
-    let on_left  = on[((16 * w + 8) * 4) as usize];
+    let on_left = on[((16 * w + 8) * 4) as usize];
     let on_right = on[((16 * w + 24) * 4) as usize];
     let span_on = (on_right as i32 - on_left as i32).abs();
-    assert!(span_on > span_off, "dehaze should widen the contrast span: off={span_off} on={span_on}");
+    assert!(
+        span_on > span_off,
+        "dehaze should widen the contrast span: off={span_off} on={span_on}"
+    );
 }
 
 // ── Phase 2E polish: Bilateral NR ─────────────────────────────────────────────
@@ -901,20 +1090,25 @@ fn dehaze_positive_increases_contrast_on_hazy_pattern() {
 fn bilateral_pipeline_smoke_test() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skip: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skip: no GPU");
+            return;
+        }
     };
     let w: u32 = 32;
     let h: u32 = 32;
     // Sharp-edge source: left half dark, right half bright.
-    let pixels: Vec<f32> = (0..w * h).flat_map(|i: u32| {
-        let x = i % w;
-        let v = if x < w / 2 { 0.2_f32 } else { 0.8_f32 };
-        [v, v, v, 1.0_f32]
-    }).collect();
+    let pixels: Vec<f32> = (0..w * h)
+        .flat_map(|i: u32| {
+            let x = i % w;
+            let v = if x < w / 2 { 0.2_f32 } else { 0.8_f32 };
+            [v, v, v, 1.0_f32]
+        })
+        .collect();
 
     let source = SourceTexture::upload(&rd, w, h, &pixels);
-    let blur   = BlurPipeline::new(&rd);
-    let bilat  = BilateralPipeline::new(&rd);
+    let blur = BlurPipeline::new(&rd);
+    let bilat = BilateralPipeline::new(&rd);
 
     // Allocate ping-pong textures for clarity, sharp, texture, and bilateral output.
     let (_, c_a, _, c_b) = create_pingpong(&rd, w, h);
@@ -922,11 +1116,11 @@ fn bilateral_pipeline_smoke_test() {
     let (_, t_a, _, t_b) = create_pingpong(&rd, w, h);
     let (_, _nr_a, _, nr_b) = create_pingpong(&rd, w, h);
 
-    blur.render_pass(&source.view, &c_a, w, h, true,  16.0);
+    blur.render_pass(&source.view, &c_a, w, h, true, 16.0);
     blur.render_pass(&c_a, &c_b, w, h, false, 16.0);
-    blur.render_pass(&source.view, &s_a, w, h, true,  1.5);
+    blur.render_pass(&source.view, &s_a, w, h, true, 1.5);
     blur.render_pass(&s_a, &s_b, w, h, false, 1.5);
-    blur.render_pass(&source.view, &t_a, w, h, true,  5.0);
+    blur.render_pass(&source.view, &t_a, w, h, true, 5.0);
     blur.render_pass(&t_a, &t_b, w, h, false, 5.0);
 
     // Bilateral filter: sigma_spatial=2px, sigma_range=0.1 (moderate edge-preservation), 7×7 window.
@@ -941,12 +1135,16 @@ fn bilateral_pipeline_smoke_test() {
 
     let mut edit = EditState::default();
     edit.detail.noise_reduction.luminance = 80.0;
-    edit.detail.noise_reduction.color     = 60.0;
+    edit.detail.noise_reduction.color = 60.0;
     pipe.update_uniforms(&EditUniforms::from(&edit));
 
     let (tex, view) = make_target(&rd, w, h);
     pipe.render(&view, &bind);
     // If we reach here without panic the bilateral pipeline is functioning.
     let pixels_out = read_to_cpu(&rd, &tex, w, h).unwrap();
-    assert_eq!(pixels_out.len(), (w * h * 4) as usize, "output buffer should have w*h*4 bytes");
+    assert_eq!(
+        pixels_out.len(),
+        (w * h * 4) as usize,
+        "output buffer should have w*h*4 bytes"
+    );
 }

@@ -23,7 +23,11 @@ impl SourceTexture {
         // Convert f32 → f16 (half) for RGBA16Float. wgpu accepts u16 bit patterns.
         let half_pixels: Vec<u16> = pixels.iter().map(|&v| f32_to_f16_bits(v)).collect();
 
-        let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
         let texture = rd.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("chalkraw source"),
             size,
@@ -52,7 +56,12 @@ impl SourceTexture {
         );
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Self { texture, view, width, height }
+        Self {
+            texture,
+            view,
+            width,
+            height,
+        }
     }
 }
 
@@ -81,7 +90,11 @@ pub fn estimate_atmospheric_light(pixels: &[f32], width: u32, height: u32) -> [f
         sum[1] += pixels[i * 4 + 1];
         sum[2] += pixels[i * 4 + 2];
     }
-    [sum[0] / top_count as f32, sum[1] / top_count as f32, sum[2] / top_count as f32]
+    [
+        sum[0] / top_count as f32,
+        sum[1] / top_count as f32,
+        sum[2] / top_count as f32,
+    ]
 }
 
 /// IEEE-754 binary32 → binary16 (round-to-nearest-even).
@@ -141,7 +154,8 @@ mod tests {
 
     #[test]
     fn estimate_atmospheric_light_finds_bright_region() {
-        let w = 10u32; let h = 10u32;
+        let w = 10u32;
+        let h = 10u32;
         // Mostly dark with a small bright corner.
         let mut pixels = vec![0.1_f32; (w * h * 4) as usize];
         // Set top-left 2x2 to bright white.
@@ -163,11 +177,11 @@ mod tests {
     fn f16_for_known_values_matches_ieee_754_binary16() {
         // Known IEEE-754 binary16 bit patterns. See Wikipedia "Half-precision floating-point format".
         let cases: &[(f32, u16)] = &[
-            (0.0,  0x0000), // +0
-            (1.0,  0x3c00), // 1.0 = 0 01111 0000000000
-            (0.5,  0x3800), // 0.5 = 0 01110 0000000000
+            (0.0, 0x0000),  // +0
+            (1.0, 0x3c00),  // 1.0 = 0 01111 0000000000
+            (0.5, 0x3800),  // 0.5 = 0 01110 0000000000
             (0.25, 0x3400), // 0.25 = 0 01101 0000000000
-            (2.0,  0x4000), // 2.0 = 0 10000 0000000000
+            (2.0, 0x4000),  // 2.0 = 0 10000 0000000000
         ];
         for &(input, expected) in cases {
             let actual = f32_to_f16_bits(input);

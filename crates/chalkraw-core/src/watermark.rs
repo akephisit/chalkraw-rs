@@ -54,7 +54,12 @@ pub struct TextColor {
 
 impl Default for TextColor {
     fn default() -> Self {
-        Self { r: 255, g: 255, b: 255, a: 255 }
+        Self {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        }
     }
 }
 
@@ -140,7 +145,12 @@ mod tests {
         p.layers.push(WatermarkLayer::Text(TextLayer {
             text: "© chalkraw".into(),
             font_size_pct: 3.0,
-            color: TextColor { r: 255, g: 255, b: 255, a: 255 },
+            color: TextColor {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255,
+            },
             anchor: WatermarkAnchor::BottomRight,
             opacity: 0.85,
             margin_pct: 3.0,

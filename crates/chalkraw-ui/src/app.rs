@@ -210,9 +210,7 @@ impl AppState {
     }
 
     pub fn take_due_watch_folder_scan(&mut self) -> Option<PathBuf> {
-        let Some(dir) = self.watch_folder.clone() else {
-            return None;
-        };
+        let dir = self.watch_folder.clone()?;
         let now = std::time::Instant::now();
         if let Some(last) = self.last_watch_scan {
             if now.duration_since(last).as_secs() < 5 {

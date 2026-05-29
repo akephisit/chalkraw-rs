@@ -5,14 +5,10 @@ use std::path::{Path, PathBuf};
 pub const SCHEMA_VERSION: u32 = 1;
 
 // Table definitions referenced from sibling modules.
-pub(crate) const PHOTOS_TABLE: TableDefinition<&[u8; 16], &[u8]> =
-    TableDefinition::new("photos");
-pub(crate) const EDITS_TABLE: TableDefinition<&[u8; 16], &[u8]> =
-    TableDefinition::new("edits");
-pub(crate) const META_TABLE: TableDefinition<&str, &[u8]> =
-    TableDefinition::new("meta");
-pub(crate) const PRESETS_TABLE: TableDefinition<&[u8; 16], &[u8]> =
-    TableDefinition::new("presets");
+pub(crate) const PHOTOS_TABLE: TableDefinition<&[u8; 16], &[u8]> = TableDefinition::new("photos");
+pub(crate) const EDITS_TABLE: TableDefinition<&[u8; 16], &[u8]> = TableDefinition::new("edits");
+pub(crate) const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+pub(crate) const PRESETS_TABLE: TableDefinition<&[u8; 16], &[u8]> = TableDefinition::new("presets");
 pub(crate) const WATERMARKS_TABLE: TableDefinition<&[u8; 16], &[u8]> =
     TableDefinition::new("watermarks");
 
@@ -67,7 +63,9 @@ impl Catalog {
         // Verify schema version on existing catalogs.
         let read = db.begin_read()?;
         let meta_tbl = read.open_table(META_TABLE)?;
-        let stored = meta_tbl.get(META_KEY)?.ok_or_else(|| CatalogError::Path(path.clone()))?;
+        let stored = meta_tbl
+            .get(META_KEY)?
+            .ok_or_else(|| CatalogError::Path(path.clone()))?;
         let meta: CatalogMeta = bincode::deserialize(stored.value())?;
         if meta.schema_version != SCHEMA_VERSION {
             return Err(CatalogError::SchemaVersion {
@@ -79,18 +77,24 @@ impl Catalog {
         Ok(Self { db, path })
     }
 
-    pub fn path(&self) -> &Path { &self.path }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 
     pub fn meta(&self) -> Result<CatalogMeta, CatalogError> {
         let read = self.db.begin_read()?;
         let meta_tbl = read.open_table(META_TABLE)?;
-        let stored = meta_tbl.get(META_KEY)?.ok_or_else(|| CatalogError::Path(self.path.clone()))?;
+        let stored = meta_tbl
+            .get(META_KEY)?
+            .ok_or_else(|| CatalogError::Path(self.path.clone()))?;
         Ok(bincode::deserialize(stored.value())?)
     }
 
     /// Sibling-module access to the underlying redb database.
     #[allow(dead_code)] // used by photos/edits modules in Task 7
-    pub(crate) fn db(&self) -> &Database { &self.db }
+    pub(crate) fn db(&self) -> &Database {
+        &self.db
+    }
 }
 
 #[cfg(test)]
@@ -148,7 +152,9 @@ mod tests {
         }
         // db drops here, releasing file lock.
 
-        let err = Catalog::open_or_create(&path, "ignored").err().expect("expected SchemaVersion error");
+        let err = Catalog::open_or_create(&path, "ignored")
+            .err()
+            .expect("expected SchemaVersion error");
         match err {
             CatalogError::SchemaVersion { found, expected } => {
                 assert_eq!(found, 99);

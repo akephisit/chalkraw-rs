@@ -1,9 +1,8 @@
 use chalkraw_core::{interpolate_curve, CurvePoint, EditState};
 use chalkraw_io::LinearImage;
 use chalkraw_render::{
-    create_pingpong, f32_to_f16_bits, BilateralPipeline, BlurPipeline, DevelopPipeline,
-    EditUniforms, PipelineConfig, RenderDevice, SourceTexture,
-    display_profile,
+    create_pingpong, display_profile, f32_to_f16_bits, BilateralPipeline, BlurPipeline,
+    DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice, SourceTexture,
 };
 use egui::PaintCallbackInfo;
 use egui_wgpu::CallbackTrait;
@@ -76,7 +75,8 @@ impl CanvasGpu {
     pub fn new(rd: &RenderDevice, img: &LinearImage, output_format: ewgpu::TextureFormat) -> Self {
         let source = SourceTexture::upload(rd, img.width, img.height, &img.pixels);
         let mut pipeline = DevelopPipeline::new(rd, PipelineConfig { output_format });
-        let atmos = chalkraw_render::source::estimate_atmospheric_light(&img.pixels, img.width, img.height);
+        let atmos =
+            chalkraw_render::source::estimate_atmospheric_light(&img.pixels, img.width, img.height);
         pipeline.set_atmospheric_light(atmos);
         let blur_pipeline = BlurPipeline::new(rd);
         let bilateral_pipeline = BilateralPipeline::new(rd);
@@ -87,13 +87,16 @@ impl CanvasGpu {
         let (texture_tex_a, texture_view_a, texture_tex_b, texture_view_b) =
             create_pingpong(rd, img.width, img.height);
         // NR uses a single ping-pong texture; the bilateral filter writes to nr_view_b directly.
-        let (nr_tex_a, nr_view_a, nr_tex_b, nr_view_b) =
-            create_pingpong(rd, img.width, img.height);
+        let (nr_tex_a, nr_view_a, nr_tex_b, nr_view_b) = create_pingpong(rd, img.width, img.height);
 
         // Point curve LUT — 256-entry R16Float 1D texture, initialised to identity ramp.
         let tone_curve_lut_tex = rd.device.create_texture(&ewgpu::TextureDescriptor {
             label: Some("tone curve lut"),
-            size: ewgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+            size: ewgpu::Extent3d {
+                width: 256,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: ewgpu::TextureDimension::D1,
@@ -101,9 +104,12 @@ impl CanvasGpu {
             usage: ewgpu::TextureUsages::TEXTURE_BINDING | ewgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let tone_curve_lut_view = tone_curve_lut_tex.create_view(&ewgpu::TextureViewDescriptor::default());
+        let tone_curve_lut_view =
+            tone_curve_lut_tex.create_view(&ewgpu::TextureViewDescriptor::default());
         // Upload identity ramp: entry i = i / 255 as f16.
-        let identity_lut: Vec<u16> = (0u16..256).map(|i| f32_to_f16_bits(i as f32 / 255.0)).collect();
+        let identity_lut: Vec<u16> = (0u16..256)
+            .map(|i| f32_to_f16_bits(i as f32 / 255.0))
+            .collect();
         rd.queue.write_texture(
             ewgpu::TexelCopyTextureInfo {
                 texture: &tone_curve_lut_tex,
@@ -117,7 +123,11 @@ impl CanvasGpu {
                 bytes_per_row: Some(256 * 2), // 1 channel × 2 bytes (f16)
                 rows_per_image: Some(1),
             },
-            ewgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+            ewgpu::Extent3d {
+                width: 256,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         );
 
         // Phase 8 polish: build display 3D LUT from monitor ICC profile (Windows only;
@@ -143,8 +153,13 @@ impl CanvasGpu {
 
         // Build the develop bind group pointing at the final blur result textures.
         let bind_group = pipeline.make_bind_group(
-            &source, &clarity_view_b, &sharp_view_b, &texture_view_b, &nr_view_b,
-            &tone_curve_lut_view, &display_lut_view,
+            &source,
+            &clarity_view_b,
+            &sharp_view_b,
+            &texture_view_b,
+            &nr_view_b,
+            &tone_curve_lut_view,
+            &display_lut_view,
         );
         let queue = rd.queue.clone();
         let mut me = Self {
@@ -192,7 +207,13 @@ impl CanvasGpu {
     ///
     /// `nr_amount` is 0..100 (average of luminance and color NR sliders).
     /// Maps to sigma_range: 0.01 (tight/edge-preserving) .. 0.21 (looser) at 100.
-    pub fn run_blurs(&self, clarity_sigma: f32, sharp_sigma: f32, texture_sigma: f32, nr_amount: f32) {
+    pub fn run_blurs(
+        &self,
+        clarity_sigma: f32,
+        sharp_sigma: f32,
+        texture_sigma: f32,
+        nr_amount: f32,
+    ) {
         // Clarity blur (large sigma).
         self.blur_pipeline.render_pass(
             &self.source.view,
@@ -286,7 +307,11 @@ impl CanvasGpu {
                 bytes_per_row: Some(256 * 2),
                 rows_per_image: Some(1),
             },
-            ewgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+            ewgpu::Extent3d {
+                width: 256,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         );
     }
 }

@@ -1,10 +1,10 @@
 //! Read a render target back to CPU memory.
 //! Also contains helpers for creating LUT textures used by the develop pipeline.
 
-use bytemuck;
 use crate::device::RenderDevice;
 use crate::error::RenderError;
 use crate::source::f32_to_f16_bits;
+use bytemuck;
 
 /// Create a 256-entry R16Float 1D identity LUT texture + view.
 /// Used by render tests as a stand-in for the real tone-curve LUT
@@ -19,10 +19,17 @@ pub fn make_identity_lut(rd: &RenderDevice) -> (wgpu::Texture, wgpu::TextureView
 /// `CurvePoint`s. The LUT is sampled as `output = LUT[input * 255]` in the shader.
 ///
 /// Exported as a public helper so the export pipeline and tests can both use it.
-pub fn make_tone_curve_lut(rd: &RenderDevice, points: &[chalkraw_core::CurvePoint]) -> (wgpu::Texture, wgpu::TextureView) {
+pub fn make_tone_curve_lut(
+    rd: &RenderDevice,
+    points: &[chalkraw_core::CurvePoint],
+) -> (wgpu::Texture, wgpu::TextureView) {
     let tex = rd.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("tone curve lut"),
-        size: wgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: 256,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D1,
@@ -50,7 +57,11 @@ pub fn make_tone_curve_lut(rd: &RenderDevice, points: &[chalkraw_core::CurvePoin
             bytes_per_row: Some(256 * 2),
             rows_per_image: Some(1),
         },
-        wgpu::Extent3d { width: 256, height: 1, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: 256,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
     );
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     (tex, view)
@@ -64,10 +75,18 @@ pub fn make_identity_3d_lut(rd: &RenderDevice) -> (wgpu::Texture, wgpu::TextureV
     crate::display_profile::upload_lut_3d(rd, &lut)
 }
 
-pub fn make_target(rd: &RenderDevice, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub fn make_target(
+    rd: &RenderDevice,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = rd.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("readback target"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -113,7 +132,11 @@ pub fn read_to_cpu(
                 rows_per_image: Some(height),
             },
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     rd.queue.submit(std::iter::once(encoder.finish()));
 
@@ -125,7 +148,9 @@ pub fn read_to_cpu(
     // wgpu 29: poll takes PollType (not Maintain) and returns Result<PollStatus, PollError>.
     // wait_indefinitely() blocks until the most recent submission is complete.
     rd.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    rx.recv().expect("map_async channel closed").map_err(RenderError::from)?;
+    rx.recv()
+        .expect("map_async channel closed")
+        .map_err(RenderError::from)?;
 
     let mapped = slice.get_mapped_range();
     let mut out = Vec::with_capacity((width * 4 * height) as usize);

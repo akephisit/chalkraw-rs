@@ -6,7 +6,8 @@ use tempfile::tempdir;
 
 fn fixture_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); p.pop();
+    p.pop();
+    p.pop();
     p.push("tests/fixtures/sample.jpg");
     p
 }
@@ -23,7 +24,13 @@ fn decode_then_persist_then_reload_restores_edit() {
     // 2. Create catalog, insert photo, store an edit.
     let photo_id = {
         let cat = Catalog::open_or_create(&cat_path, "e2e").unwrap();
-        let p = Photo::new(fixture_path(), [0u8; 32], img.width, img.height, ImageFormat::Jpeg);
+        let p = Photo::new(
+            fixture_path(),
+            [0u8; 32],
+            img.width,
+            img.height,
+            ImageFormat::Jpeg,
+        );
         cat.insert_photo(&p).unwrap();
         let mut e = EditState::default();
         e.tone.exposure = 1.7;

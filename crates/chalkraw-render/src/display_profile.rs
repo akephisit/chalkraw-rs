@@ -101,7 +101,10 @@ pub fn build_srgb_to_display_lut(display_icc_bytes: &[u8]) -> Option<DisplayLut>
         }
     }
 
-    log::info!("display_profile: built 32^3 sRGB→display 3D LUT ({} entries)", total);
+    log::info!(
+        "display_profile: built 32^3 sRGB→display 3D LUT ({} entries)",
+        total
+    );
     Some(DisplayLut { data, size })
 }
 
@@ -155,7 +158,7 @@ pub fn upload_lut_3d(rd: &RenderDevice, lut: &DisplayLut) -> (wgpu::Texture, wgp
         bytemuck::cast_slice(&lut.data),
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(lut.size * 4 * 2),  // 4 channels × 2 bytes (f16)
+            bytes_per_row: Some(lut.size * 4 * 2), // 4 channels × 2 bytes (f16)
             rows_per_image: Some(lut.size),
         },
         extent,
@@ -269,8 +272,8 @@ mod linux_impl {
 #[cfg(windows)]
 mod windows_impl {
     use std::path::PathBuf;
-    use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
     use windows::core::PWSTR;
+    use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
 
     pub fn read_primary_monitor_profile() -> Option<Vec<u8>> {
         // SAFETY: Win32 call. GetDC(None) returns the screen DC.
@@ -313,11 +316,18 @@ mod windows_impl {
             let len = size.saturating_sub(1) as usize;
             let path_str = String::from_utf16_lossy(&buf[..len]);
             let path = PathBuf::from(path_str.trim_end_matches('\0'));
-            log::info!("display_profile: primary monitor ICC profile path: {:?}", path);
+            log::info!(
+                "display_profile: primary monitor ICC profile path: {:?}",
+                path
+            );
 
             match std::fs::read(&path) {
                 Ok(bytes) => {
-                    log::info!("display_profile: loaded {} bytes from {:?}", bytes.len(), path);
+                    log::info!(
+                        "display_profile: loaded {} bytes from {:?}",
+                        bytes.len(),
+                        path
+                    );
                     Some(bytes)
                 }
                 Err(e) => {

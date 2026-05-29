@@ -1,6 +1,6 @@
 use chalkraw_core::EditState;
 use chalkraw_render::{
-    make_identity_lut, make_identity_3d_lut, make_target, read_to_cpu, DevelopPipeline,
+    make_identity_3d_lut, make_identity_lut, make_target, read_to_cpu, DevelopPipeline,
     EditUniforms, PipelineConfig, RenderDevice, SourceTexture,
 };
 
@@ -17,7 +17,10 @@ fn pixel_at(buf: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
 fn exposure_zero_returns_input_brightness() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let w = 16;
     let h = 16;
@@ -30,7 +33,9 @@ fn exposure_zero_returns_input_brightness() {
     // Pass identity LUT for tone curve (no effect). Pass identity 3D LUT for display profile.
     let (_lut_tex, lut_view) = make_identity_lut(&rd);
     let (_dlut_tex, dlut_view) = make_identity_3d_lut(&rd);
-    let bg = pipe.make_bind_group(&src, &src.view, &src.view, &src.view, &src.view, &lut_view, &dlut_view);
+    let bg = pipe.make_bind_group(
+        &src, &src.view, &src.view, &src.view, &src.view, &lut_view, &dlut_view,
+    );
     let (tex, view) = make_target(&rd, w, h);
     pipe.render(&view, &bg);
     let pixels = read_to_cpu(&rd, &tex, w, h).unwrap();
@@ -43,7 +48,10 @@ fn exposure_zero_returns_input_brightness() {
 fn exposure_plus_one_doubles_linear_brightness() {
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
-        Err(_) => { eprintln!("skipping: no GPU"); return; }
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
     };
     let w = 16;
     let h = 16;
@@ -56,7 +64,9 @@ fn exposure_plus_one_doubles_linear_brightness() {
     // Pass identity LUT for tone curve (no effect). Pass identity 3D LUT for display profile.
     let (_lut_tex, lut_view) = make_identity_lut(&rd);
     let (_dlut_tex, dlut_view) = make_identity_3d_lut(&rd);
-    let bg = pipe.make_bind_group(&src, &src.view, &src.view, &src.view, &src.view, &lut_view, &dlut_view);
+    let bg = pipe.make_bind_group(
+        &src, &src.view, &src.view, &src.view, &src.view, &lut_view, &dlut_view,
+    );
     let (tex, view) = make_target(&rd, w, h);
     pipe.render(&view, &bg);
     let pixels = read_to_cpu(&rd, &tex, w, h).unwrap();

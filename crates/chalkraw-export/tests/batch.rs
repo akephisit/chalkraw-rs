@@ -7,7 +7,7 @@ use chalkraw_render::RenderDevice;
 use std::path::PathBuf;
 
 #[allow(unused_imports)]
-use chalkraw_core::{ImageLayer, TextLayer, TextColor, WatermarkLayer, WatermarkPreset};
+use chalkraw_core::{ImageLayer, TextColor, TextLayer, WatermarkLayer, WatermarkPreset};
 
 fn fixture_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -112,7 +112,12 @@ fn export_with_text_layer_completes() {
     preset.layers.push(WatermarkLayer::Text(TextLayer {
         text: "© chalkraw".into(),
         font_size_pct: 3.0,
-        color: TextColor { r: 255, g: 255, b: 255, a: 255 },
+        color: TextColor {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        },
         anchor: chalkraw_core::WatermarkAnchor::BottomRight,
         opacity: 0.9,
         margin_pct: 3.0,
@@ -199,9 +204,8 @@ fn export_with_watermark_preset_composites_two_layers() {
 /// 90°-snap path works without GPU involvement.
 #[test]
 fn watermark_rotation_90_swaps_image_dimensions() {
-    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(
-        4, 8, image::Rgba([255, 0, 0, 255]),
-    );
+    let img =
+        image::ImageBuffer::<image::Rgba<u8>, _>::from_pixel(4, 8, image::Rgba([255, 0, 0, 255]));
     let rotated = chalkraw_export::rotate_image(&img, 90.0);
     assert_eq!(rotated.dimensions(), (8, 4));
 }

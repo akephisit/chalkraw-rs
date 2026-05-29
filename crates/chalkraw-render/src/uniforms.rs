@@ -87,86 +87,86 @@ use chalkraw_core::{curve_is_identity, EditState};
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct EditUniforms {
-    pub exposure: f32,          // offset   0
-    pub _pre_pad: [f32; 3],     // offset   4  → pads to 16
-    pub _pad_tone: [f32; 3],    // offset  16  → vec3<f32> slot in WGSL
-    pub contrast: f32,          // offset  28
-    pub highlights: f32,        // offset  32
-    pub shadows: f32,           // offset  36
-    pub whites: f32,            // offset  40
-    pub blacks: f32,            // offset  44
-    pub _pad_basic: [f32; 3],   // offset  48  → pads to 60
-    pub temp_kelvin: f32,       // offset  60
-    pub tint: f32,              // offset  64
-    pub _post_tint_pad: f32,    // offset  68
-    pub _pad_wb: [f32; 2],      // offset  72
-    pub vibrance: f32,          // offset  80
-    pub saturation: f32,        // offset  84
-    pub texture: f32,           // offset  88
-    pub clarity: f32,           // offset  92
+    pub exposure: f32,        // offset   0
+    pub _pre_pad: [f32; 3],   // offset   4  → pads to 16
+    pub _pad_tone: [f32; 3],  // offset  16  → vec3<f32> slot in WGSL
+    pub contrast: f32,        // offset  28
+    pub highlights: f32,      // offset  32
+    pub shadows: f32,         // offset  36
+    pub whites: f32,          // offset  40
+    pub blacks: f32,          // offset  44
+    pub _pad_basic: [f32; 3], // offset  48  → pads to 60
+    pub temp_kelvin: f32,     // offset  60
+    pub tint: f32,            // offset  64
+    pub _post_tint_pad: f32,  // offset  68
+    pub _pad_wb: [f32; 2],    // offset  72
+    pub vibrance: f32,        // offset  80
+    pub saturation: f32,      // offset  84
+    pub texture: f32,         // offset  88
+    pub clarity: f32,         // offset  92
     // Vignette: 4 × f32 = 16 bytes, naturally aligned to 16-byte boundary.
-    pub vignette_amount: f32,   // offset  96
-    pub vignette_midpoint: f32, // offset 100
-    pub vignette_feather: f32,  // offset 104
-    pub vignette_roundness: f32,// offset 108
+    pub vignette_amount: f32,    // offset  96
+    pub vignette_midpoint: f32,  // offset 100
+    pub vignette_feather: f32,   // offset 104
+    pub vignette_roundness: f32, // offset 108
     // Grain: 3 × f32 + 1 pad = 16 bytes.
-    pub grain_amount: f32,      // offset 112
-    pub grain_size: f32,        // offset 116
-    pub grain_roughness: f32,   // offset 120  (reserved; no shader effect in 2A)
-    pub _pad_grain: f32,        // offset 124  → pads to 128
+    pub grain_amount: f32,    // offset 112
+    pub grain_size: f32,      // offset 116
+    pub grain_roughness: f32, // offset 120  (reserved; no shader effect in 2A)
+    pub _pad_grain: f32,      // offset 124  → pads to 128
     // Phase 2B (HSL): 8 colors × {hue, sat, lum}, stored as 6 vec4 chunks of 4 colors each.
     // Each [f32; 4] is naturally 16-byte aligned, matching WGSL vec4<f32>.
-    pub hsl_hue_a: [f32; 4],   // offset 128  red, orange, yellow, green
-    pub hsl_hue_b: [f32; 4],   // offset 144  aqua, blue, purple, magenta
-    pub hsl_sat_a: [f32; 4],   // offset 160
-    pub hsl_sat_b: [f32; 4],   // offset 176
-    pub hsl_lum_a: [f32; 4],   // offset 192
-    pub hsl_lum_b: [f32; 4],   // offset 208
+    pub hsl_hue_a: [f32; 4], // offset 128  red, orange, yellow, green
+    pub hsl_hue_b: [f32; 4], // offset 144  aqua, blue, purple, magenta
+    pub hsl_sat_a: [f32; 4], // offset 160
+    pub hsl_sat_b: [f32; 4], // offset 176
+    pub hsl_lum_a: [f32; 4], // offset 192
+    pub hsl_lum_b: [f32; 4], // offset 208
     // Phase 2C (Color Grading): 4 regions × {hue, sat, lum} + blending/balance.
-    pub cg_hue: [f32; 4],          // offset 224  hue for [shadows, midtones, highlights, global]
-    pub cg_sat: [f32; 4],          // offset 240  saturation for [shadows, midtones, highlights, global]
-    pub cg_lum: [f32; 4],          // offset 256  luminance for [shadows, midtones, highlights, global]
+    pub cg_hue: [f32; 4], // offset 224  hue for [shadows, midtones, highlights, global]
+    pub cg_sat: [f32; 4], // offset 240  saturation for [shadows, midtones, highlights, global]
+    pub cg_lum: [f32; 4], // offset 256  luminance for [shadows, midtones, highlights, global]
     pub cg_blend_balance: [f32; 4], // offset 272  [blending, balance, 0, 0]
     // Phase 2D (Parametric Curve): 1 × vec4<f32> = 16 bytes.
-    pub param_curve: [f32; 4],      // offset 288  [shadows, darks, lights, highlights]
+    pub param_curve: [f32; 4], // offset 288  [shadows, darks, lights, highlights]
     // Phase 2F (Lens Correction): distortion + vignetting + 2-float pad = 16 bytes.
-    pub lens_distortion: f32,       // offset 304
-    pub lens_vignetting: f32,       // offset 308
-    pub _pad_lens: [f32; 2],        // offset 312  → pads to 320
+    pub lens_distortion: f32, // offset 304
+    pub lens_vignetting: f32, // offset 308
+    pub _pad_lens: [f32; 2],  // offset 312  → pads to 320
     // Phase 2F (Crop): crop_enabled + x/y/w/h + rotation + 2-float pad = 32 bytes.
-    pub crop_enabled: f32,          // offset 320  (0.0 = disabled, 1.0 = enabled)
-    pub crop_x: f32,                // offset 324  0..1
-    pub crop_y: f32,                // offset 328  0..1
-    pub crop_w: f32,                // offset 332  0..1 (right edge = crop_x + crop_w)
-    pub crop_h: f32,                // offset 336  0..1
-    pub crop_rotation_deg: f32,     // offset 340
-    pub _pad_crop: [f32; 2],        // offset 344  → pads to 352
+    pub crop_enabled: f32,      // offset 320  (0.0 = disabled, 1.0 = enabled)
+    pub crop_x: f32,            // offset 324  0..1
+    pub crop_y: f32,            // offset 328  0..1
+    pub crop_w: f32,            // offset 332  0..1 (right edge = crop_x + crop_w)
+    pub crop_h: f32,            // offset 336  0..1
+    pub crop_rotation_deg: f32, // offset 340
+    pub _pad_crop: [f32; 2],    // offset 344  → pads to 352
     // Phase 0.13.2: manual sRGB encode flag.
-    pub srgb_output: u32,           // offset 352  (1 = shader must encode, 0 = hardware does it)
-    pub _pad_srgb: [u32; 3],        // offset 356  → pads to 368
+    pub srgb_output: u32, // offset 352  (1 = shader must encode, 0 = hardware does it)
+    pub _pad_srgb: [u32; 3], // offset 356  → pads to 368
     // Phase 2E.2: Sharpening (amount, radius — used for blur sigma at CanvasGpu level).
-    pub sharpening_amount: f32,     // offset 368
-    pub sharpening_radius: f32,     // offset 372
-    pub _pad_sharp: [f32; 2],       // offset 376  → pads to 384
+    pub sharpening_amount: f32, // offset 368
+    pub sharpening_radius: f32, // offset 372
+    pub _pad_sharp: [f32; 2],   // offset 376  → pads to 384
     // Phase 2E.4: Noise Reduction (Gaussian-based v1).
-    pub nr_luminance: f32,          // offset 384  0..100 — strength of luminance smoothing mix
-    pub nr_color: f32,              // offset 388  0..100 — strength of chroma smoothing mix
-    pub _pad_nr: [f32; 2],          // offset 392  → pads to 400
+    pub nr_luminance: f32, // offset 384  0..100 — strength of luminance smoothing mix
+    pub nr_color: f32,     // offset 388  0..100 — strength of chroma smoothing mix
+    pub _pad_nr: [f32; 2], // offset 392  → pads to 400
     // Phase 2E.5: Dehaze (DCP approximation).
-    pub dehaze: f32,                // offset 400  -100..100 (positive=remove haze, negative=add)
-    pub _pad_dehaze: [f32; 3],      // offset 404  → pads to 416
+    pub dehaze: f32, // offset 400  -100..100 (positive=remove haze, negative=add)
+    pub _pad_dehaze: [f32; 3], // offset 404  → pads to 416
     // Phase 2E polish: Sharpening Detail + Masking (2 × f32 + 2-float pad = 16 bytes).
-    pub sharpening_detail: f32,     // offset 416  0..100
-    pub sharpening_masking: f32,    // offset 420  0..100
-    pub _pad_sharp_dm: [f32; 2],    // offset 424  → pads to 432
+    pub sharpening_detail: f32,  // offset 416  0..100
+    pub sharpening_masking: f32, // offset 420  0..100
+    pub _pad_sharp_dm: [f32; 2], // offset 424  → pads to 432
     // v0.19.1: Atmospheric light for Dehaze (4 × f32 = 16 bytes).
     pub atmospheric_light: [f32; 4], // offset 432  [r, g, b, 0.0]
     // Phase 2D polish: Point Curve LUT active flag (u32 + 3-u32 pad = 16 bytes).
-    pub tone_curve_active: u32,      // offset 448  (1 = LUT active, 0 = skip)
-    pub _pad_tca: [u32; 3],          // offset 452  → pads to 464
+    pub tone_curve_active: u32, // offset 448  (1 = LUT active, 0 = skip)
+    pub _pad_tca: [u32; 3],     // offset 452  → pads to 464
     // Phase 8 polish: Display 3D LUT active flag (u32 + 3-u32 pad = 16 bytes).
-    pub display_lut_active: u32,     // offset 464  (1 = sample display LUT, 0 = standard sRGB encode)
-    pub _pad_dla: [u32; 3],          // offset 468  → pads to 480
+    pub display_lut_active: u32, // offset 464  (1 = sample display LUT, 0 = standard sRGB encode)
+    pub _pad_dla: [u32; 3],      // offset 468  → pads to 480
 }
 
 impl From<&EditState> for EditUniforms {
@@ -203,14 +203,49 @@ impl From<&EditState> for EditUniforms {
             _pad_grain: 0.0,
             hsl_hue_a: [h[0].hue, h[1].hue, h[2].hue, h[3].hue],
             hsl_hue_b: [h[4].hue, h[5].hue, h[6].hue, h[7].hue],
-            hsl_sat_a: [h[0].saturation, h[1].saturation, h[2].saturation, h[3].saturation],
-            hsl_sat_b: [h[4].saturation, h[5].saturation, h[6].saturation, h[7].saturation],
-            hsl_lum_a: [h[0].luminance, h[1].luminance, h[2].luminance, h[3].luminance],
-            hsl_lum_b: [h[4].luminance, h[5].luminance, h[6].luminance, h[7].luminance],
+            hsl_sat_a: [
+                h[0].saturation,
+                h[1].saturation,
+                h[2].saturation,
+                h[3].saturation,
+            ],
+            hsl_sat_b: [
+                h[4].saturation,
+                h[5].saturation,
+                h[6].saturation,
+                h[7].saturation,
+            ],
+            hsl_lum_a: [
+                h[0].luminance,
+                h[1].luminance,
+                h[2].luminance,
+                h[3].luminance,
+            ],
+            hsl_lum_b: [
+                h[4].luminance,
+                h[5].luminance,
+                h[6].luminance,
+                h[7].luminance,
+            ],
             // Phase 2C: Color Grading — 4 regions: shadows(0), midtones(1), highlights(2), global(3).
-            cg_hue: [cg.shadows.hue, cg.midtones.hue, cg.highlights.hue, cg.global.hue],
-            cg_sat: [cg.shadows.saturation, cg.midtones.saturation, cg.highlights.saturation, cg.global.saturation],
-            cg_lum: [cg.shadows.luminance, cg.midtones.luminance, cg.highlights.luminance, cg.global.luminance],
+            cg_hue: [
+                cg.shadows.hue,
+                cg.midtones.hue,
+                cg.highlights.hue,
+                cg.global.hue,
+            ],
+            cg_sat: [
+                cg.shadows.saturation,
+                cg.midtones.saturation,
+                cg.highlights.saturation,
+                cg.global.saturation,
+            ],
+            cg_lum: [
+                cg.shadows.luminance,
+                cg.midtones.luminance,
+                cg.highlights.luminance,
+                cg.global.luminance,
+            ],
             cg_blend_balance: [cg.blending, cg.balance, 0.0, 0.0],
             param_curve: [
                 e.parametric_curve.shadows,
@@ -253,7 +288,11 @@ impl From<&EditState> for EditUniforms {
             // DevelopPipeline::set_atmospheric_light at source upload time.
             atmospheric_light: [0.95, 0.95, 0.95, 0.0],
             // Phase 2D polish: Point Curve LUT active flag.
-            tone_curve_active: if curve_is_identity(&e.tone_curve.rgb) { 0 } else { 1 },
+            tone_curve_active: if curve_is_identity(&e.tone_curve.rgb) {
+                0
+            } else {
+                1
+            },
             _pad_tca: [0; 3],
             // Phase 8 polish: display_lut_active is set by DevelopPipeline::update_uniforms;
             // default 0 here (standard sRGB encode path).
