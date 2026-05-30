@@ -369,25 +369,26 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let above = max(exposed - vec3<f32>(0.9), vec3<f32>(0.0));
     rgb = exposed - above * (1.0 - 1.0 / (1.0 + above * 2.0));
 
-    // 3. Contrast — more aggressive S-curve with shadow/highlight roll-off (closer to Lightroom feel).
-    //    At contrast=0 the mix factor is 0, so the result is exactly the identity.
-    //    Slope grows non-linearly so contrast=±100 feels stronger than a plain tanh(2x).
-    //    Output is normalised by the curve's actual range so ±100 reaches full black/white.
+    // 3. Contrast.
+    //    Positive contrast uses an S-curve with shoulder roll-off. Negative contrast
+    //    compresses values toward mid-grey; using a negative S-curve slope would
+    //    invert tones around -40 and produce severe colour shifts.
     let contrast_k = edit.contrast / 100.0;  // -1..1
     let abs_k = abs(contrast_k);
     if (abs_k > 0.001) {
         let centred = rgb - vec3<f32>(0.5);
-        // Non-linear slope growth: more dramatic effect at high slider values.
-        let slope = 1.0 + contrast_k * 2.0 + sign(contrast_k) * abs_k * abs_k * 1.5;
-        // tanh-based S-curve with shoulder roll-off to avoid clipping.
-        let shaped_r = tanh(centred.r * slope) * 0.5;
-        let shaped_g = tanh(centred.g * slope) * 0.5;
-        let shaped_b = tanh(centred.b * slope) * 0.5;
-        // Normalise by the curve's actual range (tanh(slope/2)*0.5 max) so ±100 reaches 0/1.
-        let norm = tanh(slope * 0.5) * 0.5;
-        let normalised = vec3<f32>(shaped_r, shaped_g, shaped_b) / max(norm, 0.0001) * 0.5;
-        // Blend by abs(contrast_k): contrast=0 is exact identity, contrast=±100 is full curve.
-        rgb = mix(rgb, normalised + vec3<f32>(0.5), abs_k);
+        if (contrast_k > 0.0) {
+            let slope = 1.0 + contrast_k * 2.0 + abs_k * abs_k * 1.5;
+            let shaped_r = tanh(centred.r * slope) * 0.5;
+            let shaped_g = tanh(centred.g * slope) * 0.5;
+            let shaped_b = tanh(centred.b * slope) * 0.5;
+            let norm = tanh(slope * 0.5) * 0.5;
+            let normalised = vec3<f32>(shaped_r, shaped_g, shaped_b) / max(norm, 0.0001) * 0.5;
+            rgb = mix(rgb, normalised + vec3<f32>(0.5), contrast_k);
+        } else {
+            let scale = 1.0 - min(abs_k * 0.95, 0.95);
+            rgb = vec3<f32>(0.5) + centred * scale;
+        }
     }
 
     // 4. Highlights / Shadows / Whites / Blacks — luminance-weighted gains.

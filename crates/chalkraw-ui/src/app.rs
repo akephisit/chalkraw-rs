@@ -186,6 +186,48 @@ impl AppState {
         Ok(())
     }
 
+    fn batch_items_from_photos(
+        &self,
+        photos: Vec<Photo>,
+        source_label: &str,
+    ) -> anyhow::Result<Vec<chalkraw_export::BatchItem>> {
+        let photo_count = photos.len();
+        let mut items = Vec::new();
+        for p in photos {
+            if p.original_path.as_os_str() == "<embedded>" {
+                log::warn!(
+                    "skip embedded fixture photo {}: cannot export embedded image",
+                    p.id
+                );
+                continue;
+            }
+            if !p.original_path.exists() {
+                log::warn!(
+                    "skip {:?}: file not found at original_path",
+                    p.original_path
+                );
+                continue;
+            }
+            let edit = self.catalog.get_edit(p.id)?;
+            let original_name = p
+                .original_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "photo".to_string());
+            items.push(chalkraw_export::BatchItem {
+                source_path: p.original_path,
+                edit,
+                original_name,
+            });
+        }
+        log::info!(
+            "export source={source_label}, source has {} photos; selected {} for export",
+            photo_count,
+            items.len()
+        );
+        Ok(items)
+    }
+
     pub fn import_candidates(
         &mut self,
         candidates: Vec<ImportCandidate>,
@@ -445,45 +487,14 @@ impl AppState {
         &self,
         only_picks: bool,
     ) -> anyhow::Result<Vec<chalkraw_export::BatchItem>> {
-        let photos = self.photos_cache.clone();
-        let photo_count = photos.len();
-        let mut items = Vec::new();
-        for p in photos {
-            if only_picks && p.flag != Flag::Pick {
-                continue;
-            }
-            if p.original_path.as_os_str() == "<embedded>" {
-                log::warn!(
-                    "skip embedded fixture photo {}: cannot export embedded image",
-                    p.id
-                );
-                continue;
-            }
-            if !p.original_path.exists() {
-                log::warn!(
-                    "skip {:?}: file not found at original_path",
-                    p.original_path
-                );
-                continue;
-            }
-            let edit = self.catalog.get_edit(p.id)?;
-            let original_name = p
-                .original_path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "photo".to_string());
-            items.push(chalkraw_export::BatchItem {
-                source_path: p.original_path,
-                edit,
-                original_name,
-            });
-        }
-        log::info!(
-            "export filter: only_picks={only_picks}, catalog has {} photos; selected {} for export",
-            photo_count,
-            items.len()
-        );
-        Ok(items)
+        let photos: Vec<Photo> = self
+            .photos_cache
+            .iter()
+            .filter(|p| !only_picks || p.flag == Flag::Pick)
+            .cloned()
+            .collect();
+        let source_label = if only_picks { "picks" } else { "all" };
+        self.batch_items_from_photos(photos, source_label)
     }
 }
 
@@ -649,6 +660,14 @@ struct BatchProgress {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportSource {
+    Current,
+    Workbench,
+    Picks,
+    All,
+}
+
 struct ExportDialogState {
     // Format
     format_index: usize, // 0=JPEG, 1=PNG, 2=TIFF
@@ -657,7 +676,7 @@ struct ExportDialogState {
     resize_long_edge: bool,
     long_edge: u32,
     // Batch source
-    only_picks: bool,
+    source: ExportSource,
     // Output
     output_dir: Option<PathBuf>,
     name_pattern: String,
@@ -678,7 +697,7 @@ impl Default for ExportDialogState {
             quality: 92,
             resize_long_edge: false,
             long_edge: 2048,
-            only_picks: false,
+            source: ExportSource::Workbench,
             output_dir: None,
             name_pattern: "{name}_edited".to_string(),
             watermark: WatermarkDialogState::default(),
@@ -702,6 +721,7 @@ pub struct ChalkrawApp {
     decode_prefetch_tx: Sender<(PhotoId, Result<LinearImage, String>)>,
     decode_prefetch_rx: Receiver<(PhotoId, Result<LinearImage, String>)>,
     pending_decode_prefetch: HashSet<PhotoId>,
+    workbench_photos: HashSet<PhotoId>,
     thumb_textures: HashMap<PhotoId, egui::TextureHandle>,
     export_dialog: Option<ExportDialogState>,
     import_progress: Option<Arc<Mutex<ImportProgress>>>,
@@ -716,7 +736,8 @@ pub struct ChalkrawApp {
 }
 
 impl ChalkrawApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+        install_ui_fonts(&cc.egui_ctx);
         let fixture: PathBuf = std::env::var_os("CHALKRAW_FIXTURE")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -744,6 +765,7 @@ impl ChalkrawApp {
             decode_prefetch_tx,
             decode_prefetch_rx,
             pending_decode_prefetch: HashSet::new(),
+            workbench_photos: HashSet::new(),
             thumb_textures: HashMap::new(),
             export_dialog: None,
             import_progress: None,
@@ -984,6 +1006,7 @@ impl ChalkrawApp {
                 self.decoded_cache_order
                     .retain(|cached_id| *cached_id != id);
                 self.pending_decode_prefetch.remove(&id);
+                self.workbench_photos.remove(&id);
                 self.thumb_textures.remove(&id);
                 self.cache_decoded_image(self.state.photo_id, self.state.image.clone());
                 if let Some(gpu) = self.gpu.as_ref() {
@@ -997,6 +1020,50 @@ impl ChalkrawApp {
                 self.import_message = Some(format!("Remove failed: {e}"));
                 log::warn!("remove current photo failed: {e}");
             }
+        }
+    }
+
+    fn collect_export_items(
+        &self,
+        source: ExportSource,
+    ) -> anyhow::Result<Vec<chalkraw_export::BatchItem>> {
+        match source {
+            ExportSource::Current => {
+                let photos: Vec<Photo> = self
+                    .state
+                    .photos_cache
+                    .iter()
+                    .filter(|p| p.id == self.state.photo_id)
+                    .cloned()
+                    .collect();
+                self.state.batch_items_from_photos(photos, "current")
+            }
+            ExportSource::Workbench => {
+                let photos: Vec<Photo> = self
+                    .state
+                    .photos_cache
+                    .iter()
+                    .filter(|p| self.workbench_photos.contains(&p.id))
+                    .cloned()
+                    .collect();
+                self.state.batch_items_from_photos(photos, "workbench")
+            }
+            ExportSource::Picks => self.state.collect_batch_items(true),
+            ExportSource::All => self.state.collect_batch_items(false),
+        }
+    }
+
+    fn export_source_count(&self, source: ExportSource) -> usize {
+        match source {
+            ExportSource::Current => usize::from(!self.state.photos_cache.is_empty()),
+            ExportSource::Workbench => self.workbench_photos.len(),
+            ExportSource::Picks => self
+                .state
+                .photos_cache
+                .iter()
+                .filter(|p| p.flag == Flag::Pick)
+                .count(),
+            ExportSource::All => self.state.photos_cache.len(),
         }
     }
 
@@ -1057,6 +1124,29 @@ impl ChalkrawApp {
         ui.horizontal(|ui| {
             ui.heading("Library");
             ui.separator();
+            if ui.button("Import Photos...").clicked() {
+                if let Some(paths) = rfd::FileDialog::new()
+                    .add_filter(
+                        "Images",
+                        &[
+                            "jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef", "arw", "raf",
+                            "pef", "orf",
+                        ],
+                    )
+                    .pick_files()
+                {
+                    self.start_import_paths(paths, "Import photos");
+                }
+            }
+            if ui.button("Import Folder...").clicked() {
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    self.start_import_folder(dir, "Import folder");
+                }
+            }
+            if ui.button("Export...").clicked() {
+                self.export_dialog = Some(ExportDialogState::default());
+            }
+            ui.separator();
             ui.add_enabled_ui(self.state.photos_cache.len() > 1, |ui| {
                 if ui.button("Remove Current From Catalog").clicked() {
                     self.remove_current_photo_from_catalog();
@@ -1064,6 +1154,15 @@ impl ChalkrawApp {
             });
             if ui.button("Develop").clicked() {
                 self.mode = WorkspaceMode::Develop;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(format!("Workbench: {} photos", self.workbench_photos.len()));
+            if ui.button("Add Current").clicked() {
+                self.workbench_photos.insert(self.state.photo_id);
+            }
+            if ui.button("Clear Workbench").clicked() {
+                self.workbench_photos.clear();
             }
         });
         ui.separator();
@@ -1104,6 +1203,7 @@ impl ChalkrawApp {
 
         let mut clicked: Option<PhotoId> = None;
         let mut open_develop: Option<PhotoId> = None;
+        let mut toggle_workbench: Option<PhotoId> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for (photo_id, name, tex, flag) in &tiles {
@@ -1140,11 +1240,21 @@ impl ChalkrawApp {
                             [180.0, 18.0],
                             egui::Label::new(egui::RichText::new(name.as_str()).small()),
                         );
+                        let mut on_workbench = self.workbench_photos.contains(photo_id);
+                        if ui.checkbox(&mut on_workbench, "Workbench").changed() {
+                            toggle_workbench = Some(*photo_id);
+                        }
                     });
                     ui.add_space(8.0);
                 }
             });
         });
+
+        if let Some(photo_id) = toggle_workbench {
+            if !self.workbench_photos.remove(&photo_id) {
+                self.workbench_photos.insert(photo_id);
+            }
+        }
 
         let open_develop_requested = open_develop.is_some();
         let target = open_develop.or(clicked);
@@ -1182,6 +1292,24 @@ impl ChalkrawApp {
             })
             .clone()
     }
+}
+
+fn install_ui_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "noto-sans-thai".to_string(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../../assets/fonts/NotoSansThai-Regular.ttf"
+        ))),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("noto-sans-thai".to_string());
+    }
+    ctx.set_fonts(fonts);
 }
 
 // ── Phase 5C: watermark preview overlay helpers ───────────────────────────────
@@ -1944,6 +2072,10 @@ impl eframe::App for ChalkrawApp {
         });
 
         // ── Export dialog ─────────────────────────────────────────────────────
+        let export_count_current = self.export_source_count(ExportSource::Current);
+        let export_count_workbench = self.export_source_count(ExportSource::Workbench);
+        let export_count_picks = self.export_source_count(ExportSource::Picks);
+        let export_count_all = self.export_source_count(ExportSource::All);
         if let Some(dlg) = self.export_dialog.as_mut() {
             let mut open = true;
             let mut should_close = false;
@@ -2024,11 +2156,27 @@ impl eframe::App for ChalkrawApp {
                     ui.separator();
 
                     // Source toggle
-                    ui.horizontal(|ui| {
-                        ui.label("Source:");
-                        ui.radio_value(&mut dlg.only_picks, false, "All photos");
-                        ui.radio_value(&mut dlg.only_picks, true, "Only Picks");
-                    });
+                    ui.label("Source:");
+                    ui.radio_value(
+                        &mut dlg.source,
+                        ExportSource::Workbench,
+                        format!("Workbench / table ({export_count_workbench} photos)"),
+                    );
+                    ui.radio_value(
+                        &mut dlg.source,
+                        ExportSource::Current,
+                        format!("Current photo ({export_count_current})"),
+                    );
+                    ui.radio_value(
+                        &mut dlg.source,
+                        ExportSource::Picks,
+                        format!("Picks ({export_count_picks} photos)"),
+                    );
+                    ui.radio_value(
+                        &mut dlg.source,
+                        ExportSource::All,
+                        format!("All catalog photos ({export_count_all} photos)"),
+                    );
 
                     ui.separator();
 
@@ -2183,14 +2331,22 @@ impl eframe::App for ChalkrawApp {
                         if ui.button("Cancel").clicked() {
                             should_close = true;
                         }
-                        let can_export = dlg.output_dir.is_some();
+                        let selected_count = match dlg.source {
+                            ExportSource::Current => export_count_current,
+                            ExportSource::Workbench => export_count_workbench,
+                            ExportSource::Picks => export_count_picks,
+                            ExportSource::All => export_count_all,
+                        };
+                        let can_export = dlg.output_dir.is_some() && selected_count > 0;
                         ui.add_enabled_ui(can_export, |ui| {
                             if ui.button("Export").clicked() {
                                 should_start_export = true;
                             }
                         });
-                        if !can_export {
+                        if dlg.output_dir.is_none() {
                             ui.label(egui::RichText::new("← choose output folder first").color(egui::Color32::GRAY).small());
+                        } else if selected_count == 0 {
+                            ui.label(egui::RichText::new("← choose at least one source photo").color(egui::Color32::GRAY).small());
                         }
                     });
                 });
@@ -2229,9 +2385,9 @@ impl eframe::App for ChalkrawApp {
                         watermark: dlg_inner.watermark.to_stamp(),
                         watermark_preset,
                     };
-                    let only_picks = dlg_inner.only_picks;
+                    let source = dlg_inner.source;
 
-                    match self.state.collect_batch_items(only_picks) {
+                    match self.collect_export_items(source) {
                         Ok(items) => {
                             let total = items.len();
                             let progress = Arc::new(Mutex::new(BatchProgress {

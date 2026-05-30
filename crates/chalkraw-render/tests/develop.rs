@@ -81,6 +81,61 @@ fn contrast_plus_50_pushes_value_away_from_midgrey() {
     );
 }
 
+/// Negative contrast should compress tones toward mid-grey without inverting them.
+#[test]
+fn contrast_minus_40_compresses_without_inverting() {
+    let _gpu_test_guard = gpu_test_lock();
+    let rd = match RenderDevice::new_headless() {
+        Ok(rd) => rd,
+        Err(_) => {
+            eprintln!("skipping: no GPU");
+            return;
+        }
+    };
+    let (w, h) = (16, 16);
+    let mut edit = EditState::default();
+    edit.tone.contrast = -40.0;
+
+    let base_edit = EditState::default();
+    let dark_base = pixel_at(
+        &render_solid(&rd, w, h, solid_grey(w, h, 0.25), &base_edit),
+        w,
+        8,
+        8,
+    );
+    let light_base = pixel_at(
+        &render_solid(&rd, w, h, solid_grey(w, h, 0.75), &base_edit),
+        w,
+        8,
+        8,
+    );
+    let dark = pixel_at(
+        &render_solid(&rd, w, h, solid_grey(w, h, 0.25), &edit),
+        w,
+        8,
+        8,
+    );
+    let light = pixel_at(
+        &render_solid(&rd, w, h, solid_grey(w, h, 0.75), &edit),
+        w,
+        8,
+        8,
+    );
+
+    assert!(
+        dark[0] > dark_base[0],
+        "contrast -40 should lift dark tones toward mid-grey; got {dark:?} vs {dark_base:?}"
+    );
+    assert!(
+        light[0] < light_base[0],
+        "contrast -40 should lower light tones toward mid-grey; got {light:?} vs {light_base:?}"
+    );
+    assert!(
+        dark[0] < light[0],
+        "contrast -40 must preserve tonal ordering; dark={dark:?}, light={light:?}"
+    );
+}
+
 /// +50 shadows on a 0.2-grey pixel should brighten it.
 #[test]
 fn shadows_plus_50_brightens_dark_pixels() {
