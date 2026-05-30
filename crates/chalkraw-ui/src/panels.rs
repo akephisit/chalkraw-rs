@@ -404,83 +404,92 @@ pub fn left_panel(ui: &mut Ui, state: &mut crate::app::AppState) -> bool {
 
     ui.heading("Catalog");
     ui.separator();
-    ui.label("Folders");
-    ui.indent("folders", |ui| {
-        let mut folder_summary: std::collections::BTreeMap<std::path::PathBuf, usize> =
-            std::collections::BTreeMap::new();
-        for p in &state.photos_cache {
-            if let Some(parent) = p.original_path.parent() {
-                *folder_summary.entry(parent.to_path_buf()).or_insert(0) += 1;
-            }
-        }
-        if folder_summary.is_empty() {
-            ui.label("(no photos imported yet)");
-        } else {
-            let all_count: usize = folder_summary.values().sum();
-            if ui
-                .selectable_label(state.folder_filter.is_none(), format!("All ({all_count})"))
-                .clicked()
-            {
-                state.folder_filter = None;
-            }
-            let mut new_filter = state.folder_filter.clone();
-            for (folder, count) in &folder_summary {
-                let label = folder
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| folder.display().to_string());
-                let is_active = state.folder_filter.as_ref() == Some(folder);
-                if ui
-                    .selectable_label(is_active, format!("{label} ({count})"))
-                    .clicked()
-                {
-                    new_filter = Some(folder.clone());
-                }
-            }
-            state.folder_filter = new_filter;
-        }
-    });
-    ui.add_space(8.0);
     ui.label("Collections");
     ui.indent("collections", |ui| {
-        let all_count = state.photos_cache.len();
-        let picks_count = state
-            .photos_cache
-            .iter()
-            .filter(|p| p.flag == chalkraw_core::Flag::Pick)
-            .count();
-        let rejected_count = state
-            .photos_cache
-            .iter()
-            .filter(|p| p.flag == chalkraw_core::Flag::Reject)
-            .count();
-
         if ui
             .selectable_label(
                 state.collection_filter == CollectionFilter::All,
-                format!("All ({all_count})"),
+                format!(
+                    "All Photos ({})",
+                    state.collection_count(CollectionFilter::All)
+                ),
             )
             .clicked()
         {
-            state.collection_filter = CollectionFilter::All;
+            state.select_collection(CollectionFilter::All);
         }
         if ui
             .selectable_label(
                 state.collection_filter == CollectionFilter::Picks,
-                format!("Picks ({picks_count})"),
+                format!(
+                    "Picks ({})",
+                    state.collection_count(CollectionFilter::Picks)
+                ),
             )
             .clicked()
         {
-            state.collection_filter = CollectionFilter::Picks;
+            state.select_collection(CollectionFilter::Picks);
         }
         if ui
             .selectable_label(
                 state.collection_filter == CollectionFilter::Rejected,
-                format!("Rejected ({rejected_count})"),
+                format!(
+                    "Rejected ({})",
+                    state.collection_count(CollectionFilter::Rejected)
+                ),
             )
             .clicked()
         {
-            state.collection_filter = CollectionFilter::Rejected;
+            state.select_collection(CollectionFilter::Rejected);
+        }
+
+        let collections = state.collections_cache.clone();
+        for collection in collections {
+            let filter = CollectionFilter::User(collection.id);
+            if ui
+                .selectable_label(
+                    state.collection_filter == filter,
+                    format!("{} ({})", collection.name, state.collection_count(filter)),
+                )
+                .clicked()
+            {
+                state.select_collection(filter);
+            }
+        }
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut state.new_collection_name)
+                    .desired_width(120.0)
+                    .hint_text("collection name"),
+            );
+            if ui.button("New").clicked() && !state.new_collection_name.trim().is_empty() {
+                if let Err(e) = state.create_collection_from_input() {
+                    log::warn!("create collection failed: {e}");
+                }
+            }
+        });
+
+        if state.active_collection_id().is_some() {
+            ui.add_space(6.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut state.rename_collection_name)
+                    .desired_width(160.0)
+                    .hint_text("rename collection"),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Rename").clicked() {
+                    if let Err(e) = state.rename_active_collection() {
+                        log::warn!("rename collection failed: {e}");
+                    }
+                }
+                if ui.button("Delete").clicked() {
+                    if let Err(e) = state.delete_active_collection() {
+                        log::warn!("delete collection failed: {e}");
+                    }
+                }
+            });
         }
     });
     ui.add_space(8.0);
@@ -567,7 +576,7 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.white_balance.temp_kelvin,
                 2000.0..=10000.0,
                 5500.0,
-                50.0,
+                25.0,
                 0,
                 " K",
             );
@@ -578,29 +587,29 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.white_balance.tint,
                 -100.0..=100.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             );
 
             ui.add_space(4.0);
 
             ui.label("Exposure");
-            changed |= slider_scroll(ui, &mut edit.tone.exposure, -5.0..=5.0, 0.0, 0.05, 2);
+            changed |= slider_scroll(ui, &mut edit.tone.exposure, -5.0..=5.0, 0.0, 0.02, 2);
 
             ui.label("Contrast");
-            changed |= slider_scroll(ui, &mut edit.tone.contrast, -100.0..=100.0, 0.0, 1.0, 0);
+            changed |= slider_scroll(ui, &mut edit.tone.contrast, -100.0..=100.0, 0.0, 0.5, 1);
 
             ui.label("Highlights");
-            changed |= slider_scroll(ui, &mut edit.tone.highlights, -100.0..=100.0, 0.0, 1.0, 0);
+            changed |= slider_scroll(ui, &mut edit.tone.highlights, -100.0..=100.0, 0.0, 0.5, 1);
 
             ui.label("Shadows");
-            changed |= slider_scroll(ui, &mut edit.tone.shadows, -100.0..=100.0, 0.0, 1.0, 0);
+            changed |= slider_scroll(ui, &mut edit.tone.shadows, -100.0..=100.0, 0.0, 0.5, 1);
 
             ui.label("Whites");
-            changed |= slider_scroll(ui, &mut edit.tone.whites, -100.0..=100.0, 0.0, 1.0, 0);
+            changed |= slider_scroll(ui, &mut edit.tone.whites, -100.0..=100.0, 0.0, 0.5, 1);
 
             ui.label("Blacks");
-            changed |= slider_scroll(ui, &mut edit.tone.blacks, -100.0..=100.0, 0.0, 1.0, 0);
+            changed |= slider_scroll(ui, &mut edit.tone.blacks, -100.0..=100.0, 0.0, 0.5, 1);
         });
 
     // ── Presence (multi-pass — Phase 2E) ─────────────────────────────────────
@@ -608,15 +617,15 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
         .default_open(false)
         .show(ui, |ui| {
             ui.label("Texture");
-            if slider_scroll(ui, &mut edit.presence.texture, -100.0..=100.0, 0.0, 1.0, 0) {
+            if slider_scroll(ui, &mut edit.presence.texture, -100.0..=100.0, 0.0, 0.5, 1) {
                 changed = true;
             }
             ui.label("Clarity");
-            if slider_scroll(ui, &mut edit.presence.clarity, -100.0..=100.0, 0.0, 1.0, 0) {
+            if slider_scroll(ui, &mut edit.presence.clarity, -100.0..=100.0, 0.0, 0.5, 1) {
                 changed = true;
             }
             ui.label("Dehaze");
-            if slider_scroll(ui, &mut edit.presence.dehaze, -100.0..=100.0, 0.0, 1.0, 0) {
+            if slider_scroll(ui, &mut edit.presence.dehaze, -100.0..=100.0, 0.0, 0.5, 1) {
                 changed = true;
             }
         });
@@ -626,10 +635,10 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
         .default_open(true)
         .show(ui, |ui| {
             ui.label("Vibrance");
-            changed |= slider_scroll(ui, &mut edit.color.vibrance, -100.0..=100.0, 0.0, 1.0, 0);
+            changed |= slider_scroll(ui, &mut edit.color.vibrance, -100.0..=100.0, 0.0, 0.5, 1);
 
             ui.label("Saturation");
-            changed |= slider_scroll(ui, &mut edit.color.saturation, -100.0..=100.0, 0.0, 1.0, 0);
+            changed |= slider_scroll(ui, &mut edit.color.saturation, -100.0..=100.0, 0.0, 0.5, 1);
         });
 
     // ── Tone Curve (Phase 2D) ─────────────────────────────────────────────────
@@ -646,8 +655,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                         &mut edit.parametric_curve.highlights,
                         -100.0..=100.0,
                         0.0,
-                        1.0,
-                        0,
+                        0.5,
+                        1,
                     ) {
                         changed = true;
                     }
@@ -657,8 +666,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                         &mut edit.parametric_curve.lights,
                         -100.0..=100.0,
                         0.0,
-                        1.0,
-                        0,
+                        0.5,
+                        1,
                     ) {
                         changed = true;
                     }
@@ -668,8 +677,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                         &mut edit.parametric_curve.darks,
                         -100.0..=100.0,
                         0.0,
-                        1.0,
-                        0,
+                        0.5,
+                        1,
                     ) {
                         changed = true;
                     }
@@ -679,8 +688,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                         &mut edit.parametric_curve.shadows,
                         -100.0..=100.0,
                         0.0,
-                        1.0,
-                        0,
+                        0.5,
+                        1,
                     ) {
                         changed = true;
                     }
@@ -720,7 +729,7 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                     .default_open(false)
                     .show(ui, |ui| {
                         ui.label("Hue");
-                        if slider_scroll(ui, &mut edit.hsl[i].hue, -100.0..=100.0, 0.0, 1.0, 0) {
+                        if slider_scroll(ui, &mut edit.hsl[i].hue, -100.0..=100.0, 0.0, 0.5, 1) {
                             changed = true;
                         }
                         ui.label("Saturation");
@@ -729,8 +738,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                             &mut edit.hsl[i].saturation,
                             -100.0..=100.0,
                             0.0,
-                            1.0,
-                            0,
+                            0.5,
+                            1,
                         ) {
                             changed = true;
                         }
@@ -740,8 +749,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                             &mut edit.hsl[i].luminance,
                             -100.0..=100.0,
                             0.0,
-                            1.0,
-                            0,
+                            0.5,
+                            1,
                         ) {
                             changed = true;
                         }
@@ -763,8 +772,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.color_grading.shadows.luminance,
                 -100.0..=100.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -779,8 +788,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.color_grading.midtones.luminance,
                 -100.0..=100.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -795,8 +804,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.color_grading.highlights.luminance,
                 -100.0..=100.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -811,8 +820,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.color_grading.global.luminance,
                 -100.0..=100.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -823,8 +832,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.color_grading.blending,
                 0.0..=100.0,
                 50.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -834,8 +843,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.color_grading.balance,
                 -100.0..=100.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -852,8 +861,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.detail.sharpening.amount,
                 0.0..=150.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -863,8 +872,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.detail.sharpening.radius,
                 0.5..=3.0,
                 1.0,
-                0.1,
-                1,
+                0.05,
+                2,
                 " px",
             ) {
                 changed = true;
@@ -876,8 +885,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.detail.sharpening.detail,
                 0.0..=100.0,
                 25.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -887,8 +896,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.detail.sharpening.masking,
                 0.0..=100.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -900,8 +909,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.detail.noise_reduction.luminance,
                 0.0..=100.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -911,8 +920,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.detail.noise_reduction.color,
                 0.0..=100.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -929,8 +938,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.effects.vignette.amount,
                 -100.0..=100.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             );
 
             ui.label("Midpoint");
@@ -939,8 +948,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.effects.vignette.midpoint,
                 0.0..=100.0,
                 50.0,
-                1.0,
-                0,
+                0.5,
+                1,
             );
 
             ui.label("Feather");
@@ -949,8 +958,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.effects.vignette.feather,
                 0.0..=100.0,
                 50.0,
-                1.0,
-                0,
+                0.5,
+                1,
             );
 
             ui.label("Roundness");
@@ -959,17 +968,17 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.effects.vignette.roundness,
                 -100.0..=100.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             );
 
             ui.add_space(6.0);
             ui.strong("Grain");
             ui.label("Amount");
-            changed |= slider_scroll(ui, &mut edit.effects.grain.amount, 0.0..=100.0, 0.0, 1.0, 0);
+            changed |= slider_scroll(ui, &mut edit.effects.grain.amount, 0.0..=100.0, 0.0, 0.5, 1);
 
             ui.label("Size");
-            changed |= slider_scroll(ui, &mut edit.effects.grain.size, 0.0..=100.0, 25.0, 1.0, 0);
+            changed |= slider_scroll(ui, &mut edit.effects.grain.size, 0.0..=100.0, 25.0, 0.5, 1);
 
             ui.label("Roughness");
             if slider_scroll(
@@ -977,8 +986,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.effects.grain.roughness,
                 0.0..=100.0,
                 50.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -994,8 +1003,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.lens_correction.distortion,
                 -100.0..=100.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -1005,8 +1014,8 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
                 &mut edit.lens_correction.vignetting,
                 0.0..=100.0,
                 0.0,
-                1.0,
-                0,
+                0.5,
+                1,
             ) {
                 changed = true;
             }
@@ -1035,19 +1044,19 @@ pub fn right_panel(ui: &mut Ui, edit: &mut EditState) -> EditChange {
             }
             if let Some(crop) = edit.crop.as_mut() {
                 ui.label("X");
-                if slider_scroll(ui, &mut crop.x_pct, 0.0..=1.0, 0.0, 0.005, 3) {
+                if slider_scroll(ui, &mut crop.x_pct, 0.0..=1.0, 0.0, 0.002, 3) {
                     changed = true;
                 }
                 ui.label("Y");
-                if slider_scroll(ui, &mut crop.y_pct, 0.0..=1.0, 0.0, 0.005, 3) {
+                if slider_scroll(ui, &mut crop.y_pct, 0.0..=1.0, 0.0, 0.002, 3) {
                     changed = true;
                 }
                 ui.label("Width");
-                if slider_scroll(ui, &mut crop.w_pct, 0.01..=1.0, 1.0, 0.005, 3) {
+                if slider_scroll(ui, &mut crop.w_pct, 0.01..=1.0, 1.0, 0.002, 3) {
                     changed = true;
                 }
                 ui.label("Height");
-                if slider_scroll(ui, &mut crop.h_pct, 0.01..=1.0, 1.0, 0.005, 3) {
+                if slider_scroll(ui, &mut crop.h_pct, 0.01..=1.0, 1.0, 0.002, 3) {
                     changed = true;
                 }
                 ui.label("Rotation");

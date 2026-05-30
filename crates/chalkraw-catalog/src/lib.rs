@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod collections;
 pub mod edits;
 pub mod error;
 pub mod photos;

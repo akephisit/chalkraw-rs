@@ -1,4 +1,4 @@
-use crate::catalog::{Catalog, EDITS_TABLE, PHOTOS_TABLE};
+use crate::catalog::{Catalog, COLLECTION_PHOTOS_TABLE, EDITS_TABLE, PHOTOS_TABLE};
 use crate::error::CatalogError;
 use chalkraw_core::{Flag, ImageFormat, Photo, PhotoId};
 use redb::{ReadableDatabase, ReadableTable};
@@ -77,6 +77,21 @@ impl Catalog {
         {
             let mut edits = write.open_table(EDITS_TABLE)?;
             edits.remove(id.as_bytes())?;
+        }
+        {
+            let mut collection_photos = write.open_table(COLLECTION_PHOTOS_TABLE)?;
+            let mut keys_to_remove = Vec::new();
+            for entry in collection_photos.iter()? {
+                let (key, _) = entry?;
+                let key = *key.value();
+                let photo_id = PhotoId::from_bytes(key[16..].try_into().expect("photo id length"));
+                if photo_id == id {
+                    keys_to_remove.push(key);
+                }
+            }
+            for key in keys_to_remove {
+                collection_photos.remove(&key)?;
+            }
         }
         write.commit()?;
         Ok(())

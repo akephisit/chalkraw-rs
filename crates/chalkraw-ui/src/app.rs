@@ -1,7 +1,7 @@
 use crate::canvas::{CanvasCallback, CanvasGpu};
 use crate::panels::{left_panel, right_panel, EditChange};
 use chalkraw_catalog::Catalog;
-use chalkraw_core::{EditState, Flag, ImageFormat, Photo, PhotoId};
+use chalkraw_core::{Collection, CollectionId, EditState, Flag, ImageFormat, Photo, PhotoId};
 use chalkraw_io::{decode_image, decode_image_bytes, LinearImage};
 use chalkraw_render::RenderDevice;
 use rayon::prelude::*;
@@ -28,6 +28,7 @@ pub enum CollectionFilter {
     All,
     Picks,
     Rejected,
+    User(CollectionId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -45,9 +46,12 @@ pub struct AppState {
     pub catalog: Catalog,
     pub photos_cache: Vec<Photo>,
     pub photo_hashes: HashSet<[u8; 32]>,
+    pub collections_cache: Vec<Collection>,
+    pub collection_members_cache: HashMap<CollectionId, HashSet<PhotoId>>,
     pub dirty_since: Option<Instant>,
     pub new_preset_name: String,
-    pub folder_filter: Option<std::path::PathBuf>,
+    pub new_collection_name: String,
+    pub rename_collection_name: String,
     pub collection_filter: CollectionFilter,
     pub watch_folder: Option<std::path::PathBuf>,
     pub last_watch_scan: Option<std::time::Instant>,
@@ -102,6 +106,15 @@ impl AppState {
         };
         let photos_cache = catalog.list_photos()?;
         let photo_hashes = photos_cache.iter().map(|p| p.file_hash).collect();
+        let collections_cache = catalog.list_collections()?;
+        let mut collection_members_cache = HashMap::new();
+        for collection in &collections_cache {
+            let members = catalog
+                .list_collection_photo_ids(collection.id)?
+                .into_iter()
+                .collect();
+            collection_members_cache.insert(collection.id, members);
+        }
 
         Ok(Self {
             edit,
@@ -111,9 +124,12 @@ impl AppState {
             catalog,
             photos_cache,
             photo_hashes,
+            collections_cache,
+            collection_members_cache,
             dirty_since: None,
             new_preset_name: String::new(),
-            folder_filter: None,
+            new_collection_name: String::new(),
+            rename_collection_name: String::new(),
             collection_filter: CollectionFilter::All,
             watch_folder: None,
             last_watch_scan: None,
@@ -232,22 +248,53 @@ impl AppState {
         &mut self,
         candidates: Vec<ImportCandidate>,
         summary: &mut ImportSummary,
+        target_collection: Option<CollectionId>,
     ) -> anyhow::Result<()> {
         let mut photos = Vec::new();
+        let mut collection_photo_ids = HashSet::new();
+        if let Some(collection_id) = target_collection {
+            for hash in &summary.duplicate_hashes {
+                if let Some(photo) = self
+                    .photos_cache
+                    .iter()
+                    .find(|photo| photo.file_hash == *hash)
+                {
+                    collection_photo_ids.insert(photo.id);
+                }
+            }
+            self.collection_members_cache
+                .entry(collection_id)
+                .or_default();
+        }
         for c in candidates {
             if self.photo_hashes.contains(&c.hash) {
                 log::info!("skip {:?}: already imported", c.path);
                 summary.duplicates += 1;
+                summary.duplicate_hashes.push(c.hash);
+                if target_collection.is_some() {
+                    if let Some(photo) = self.photos_cache.iter().find(|p| p.file_hash == c.hash) {
+                        collection_photo_ids.insert(photo.id);
+                    }
+                }
                 continue;
             }
             self.photo_hashes.insert(c.hash);
             let mut p = Photo::new(c.path, c.hash, c.width, c.height, c.format);
             p.thumbnail = c.thumbnail;
+            collection_photo_ids.insert(p.id);
             photos.push(p);
         }
         let inserted = photos.len();
         self.catalog.insert_photos(&photos)?;
         self.photos_cache.extend(photos);
+        if let Some(collection_id) = target_collection {
+            let ids: Vec<PhotoId> = collection_photo_ids.into_iter().collect();
+            self.catalog.add_photos_to_collection(collection_id, &ids)?;
+            self.collection_members_cache
+                .entry(collection_id)
+                .or_default()
+                .extend(ids);
+        }
         summary.inserted += inserted;
         Ok(())
     }
@@ -275,8 +322,7 @@ impl AppState {
             }
         }
         if next_paths.is_empty() {
-            self.folder_filter = None;
-            self.collection_filter = CollectionFilter::All;
+            self.select_collection(CollectionFilter::All);
             next_paths.extend(
                 self.photos_cache
                     .iter()
@@ -292,6 +338,9 @@ impl AppState {
                     self.catalog.remove_photo_with_edit(removed_id)?;
                     self.photos_cache.retain(|p| p.id != removed_id);
                     self.photo_hashes.remove(&removed_hash);
+                    for members in self.collection_members_cache.values_mut() {
+                        members.remove(&removed_id);
+                    }
                     return Ok(removed_id);
                 }
                 Err(e) => {
@@ -413,26 +462,125 @@ impl AppState {
         Some(dir)
     }
 
+    pub fn active_collection_id(&self) -> Option<CollectionId> {
+        match self.collection_filter {
+            CollectionFilter::User(id) => Some(id),
+            CollectionFilter::All | CollectionFilter::Picks | CollectionFilter::Rejected => None,
+        }
+    }
+
+    pub fn active_collection_label(&self) -> String {
+        match self.collection_filter {
+            CollectionFilter::All => "All Photos".to_string(),
+            CollectionFilter::Picks => "Picks".to_string(),
+            CollectionFilter::Rejected => "Rejected".to_string(),
+            CollectionFilter::User(id) => self
+                .collections_cache
+                .iter()
+                .find(|collection| collection.id == id)
+                .map(|collection| collection.name.clone())
+                .unwrap_or_else(|| "Collection".to_string()),
+        }
+    }
+
+    pub fn collection_count(&self, filter: CollectionFilter) -> usize {
+        match filter {
+            CollectionFilter::All => self.photos_cache.len(),
+            CollectionFilter::Picks => self
+                .photos_cache
+                .iter()
+                .filter(|p| p.flag == Flag::Pick)
+                .count(),
+            CollectionFilter::Rejected => self
+                .photos_cache
+                .iter()
+                .filter(|p| p.flag == Flag::Reject)
+                .count(),
+            CollectionFilter::User(id) => self
+                .collection_members_cache
+                .get(&id)
+                .map(HashSet::len)
+                .unwrap_or(0),
+        }
+    }
+
+    pub fn select_collection(&mut self, filter: CollectionFilter) {
+        self.collection_filter = filter;
+        self.rename_collection_name = match filter {
+            CollectionFilter::User(id) => self
+                .collections_cache
+                .iter()
+                .find(|collection| collection.id == id)
+                .map(|collection| collection.name.clone())
+                .unwrap_or_default(),
+            CollectionFilter::All | CollectionFilter::Picks | CollectionFilter::Rejected => {
+                String::new()
+            }
+        };
+    }
+
+    pub fn create_collection_from_input(&mut self) -> anyhow::Result<()> {
+        let name = std::mem::take(&mut self.new_collection_name);
+        let collection = self.catalog.create_collection(name)?;
+        self.collection_members_cache
+            .entry(collection.id)
+            .or_default();
+        self.rename_collection_name = collection.name.clone();
+        self.collection_filter = CollectionFilter::User(collection.id);
+        self.collections_cache.push(collection);
+        Ok(())
+    }
+
+    pub fn rename_active_collection(&mut self) -> anyhow::Result<()> {
+        let Some(id) = self.active_collection_id() else {
+            return Ok(());
+        };
+        let collection = self
+            .catalog
+            .rename_collection(id, self.rename_collection_name.clone())?;
+        if let Some(existing) = self.collections_cache.iter_mut().find(|item| item.id == id) {
+            *existing = collection.clone();
+        }
+        self.rename_collection_name = collection.name;
+        Ok(())
+    }
+
+    pub fn delete_active_collection(&mut self) -> anyhow::Result<()> {
+        let Some(id) = self.active_collection_id() else {
+            return Ok(());
+        };
+        self.catalog.delete_collection(id)?;
+        self.collections_cache
+            .retain(|collection| collection.id != id);
+        self.collection_members_cache.remove(&id);
+        self.collection_filter = CollectionFilter::All;
+        self.rename_collection_name.clear();
+        Ok(())
+    }
+
     pub fn visible_photos(&self) -> Vec<Photo> {
         let mut photos = self.photos_cache.clone();
-        if let Some(filter) = &self.folder_filter {
-            photos.retain(|p| p.original_path.parent() == Some(filter.as_path()));
-        }
         match self.collection_filter {
             CollectionFilter::All => {}
             CollectionFilter::Picks => photos.retain(|p| p.flag == Flag::Pick),
             CollectionFilter::Rejected => photos.retain(|p| p.flag == Flag::Reject),
+            CollectionFilter::User(id) => {
+                if let Some(members) = self.collection_members_cache.get(&id) {
+                    photos.retain(|p| members.contains(&p.id));
+                } else {
+                    photos.clear();
+                }
+            }
         }
         photos
     }
 
     pub fn has_active_filter(&self) -> bool {
-        self.folder_filter.is_some() || self.collection_filter != CollectionFilter::All
+        self.collection_filter != CollectionFilter::All
     }
 
     pub fn clear_filters(&mut self) {
-        self.folder_filter = None;
-        self.collection_filter = CollectionFilter::All;
+        self.select_collection(CollectionFilter::All);
     }
 
     pub fn filter_summary(&self) -> Option<String> {
@@ -440,17 +588,13 @@ impl AppState {
             return None;
         }
         let mut parts = Vec::new();
-        if let Some(folder) = &self.folder_filter {
-            let label = folder
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| folder.display().to_string());
-            parts.push(format!("Folder: {label}"));
-        }
         match self.collection_filter {
             CollectionFilter::All => {}
             CollectionFilter::Picks => parts.push("Collection: Picks".to_string()),
             CollectionFilter::Rejected => parts.push("Collection: Rejected".to_string()),
+            CollectionFilter::User(_) => {
+                parts.push(format!("Collection: {}", self.active_collection_label()));
+            }
         }
         Some(parts.join(" | "))
     }
@@ -522,6 +666,7 @@ pub struct ImportSummary {
     duplicates: usize,
     failed: usize,
     failures: Vec<ImportFailure>,
+    duplicate_hashes: Vec<[u8; 32]>,
 }
 
 impl ImportSummary {
@@ -662,8 +807,8 @@ struct BatchProgress {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExportSource {
+    Selected,
     Current,
-    Workbench,
     Picks,
     All,
 }
@@ -697,7 +842,7 @@ impl Default for ExportDialogState {
             quality: 92,
             resize_long_edge: false,
             long_edge: 2048,
-            source: ExportSource::Workbench,
+            source: ExportSource::Selected,
             output_dir: None,
             name_pattern: "{name}_edited".to_string(),
             watermark: WatermarkDialogState::default(),
@@ -706,6 +851,70 @@ impl Default for ExportDialogState {
             completion_message: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SelectionModifiers {
+    ctrl: bool,
+    shift: bool,
+}
+
+fn apply_library_selection(
+    selected: &mut HashSet<PhotoId>,
+    anchor: &mut Option<PhotoId>,
+    visible: &[PhotoId],
+    clicked: PhotoId,
+    modifiers: SelectionModifiers,
+) {
+    if modifiers.shift {
+        let start = anchor
+            .and_then(|id| visible.iter().position(|visible_id| *visible_id == id))
+            .unwrap_or_else(|| {
+                visible
+                    .iter()
+                    .position(|visible_id| *visible_id == clicked)
+                    .unwrap_or(0)
+            });
+        let end = visible
+            .iter()
+            .position(|visible_id| *visible_id == clicked)
+            .unwrap_or(start);
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        if !modifiers.ctrl {
+            selected.clear();
+        }
+        selected.extend(visible[lo..=hi].iter().copied());
+        if anchor.is_none() {
+            *anchor = Some(clicked);
+        }
+        return;
+    }
+
+    if modifiers.ctrl {
+        if !selected.remove(&clicked) {
+            selected.insert(clicked);
+        }
+        *anchor = Some(clicked);
+        return;
+    }
+
+    selected.clear();
+    selected.insert(clicked);
+    *anchor = Some(clicked);
+}
+
+fn select_all_visible(
+    selected: &mut HashSet<PhotoId>,
+    anchor: &mut Option<PhotoId>,
+    visible: &[PhotoId],
+) {
+    selected.clear();
+    selected.extend(visible.iter().copied());
+    *anchor = visible.first().copied();
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -721,10 +930,12 @@ pub struct ChalkrawApp {
     decode_prefetch_tx: Sender<(PhotoId, Result<LinearImage, String>)>,
     decode_prefetch_rx: Receiver<(PhotoId, Result<LinearImage, String>)>,
     pending_decode_prefetch: HashSet<PhotoId>,
-    workbench_photos: HashSet<PhotoId>,
+    selected_photos: HashSet<PhotoId>,
+    selection_anchor: Option<PhotoId>,
     thumb_textures: HashMap<PhotoId, egui::TextureHandle>,
     export_dialog: Option<ExportDialogState>,
     import_progress: Option<Arc<Mutex<ImportProgress>>>,
+    pending_import_collection: Option<CollectionId>,
     import_message: Option<String>,
     watermark_editor: Option<WatermarkEditorState>,
     /// Cached egui textures for image layers shown in the watermark preview overlay.
@@ -765,10 +976,12 @@ impl ChalkrawApp {
             decode_prefetch_tx,
             decode_prefetch_rx,
             pending_decode_prefetch: HashSet::new(),
-            workbench_photos: HashSet::new(),
+            selected_photos: HashSet::new(),
+            selection_anchor: None,
             thumb_textures: HashMap::new(),
             export_dialog: None,
             import_progress: None,
+            pending_import_collection: None,
             import_message: None,
             watermark_editor: None,
             watermark_preview_textures: HashMap::new(),
@@ -800,6 +1013,7 @@ impl ChalkrawApp {
             p.summary = summary;
         });
         self.import_progress = Some(progress);
+        self.pending_import_collection = self.state.active_collection_id();
         self.import_message = Some(format!("{label}: queued import"));
     }
 
@@ -838,6 +1052,7 @@ impl ChalkrawApp {
             p.summary = summary;
         });
         self.import_progress = Some(progress);
+        self.pending_import_collection = self.state.active_collection_id();
         self.import_message = Some(format!("{label}: scanning folder"));
     }
 
@@ -860,9 +1075,14 @@ impl ChalkrawApp {
         };
         if let Some(error) = error {
             self.import_message = Some(format!("Import failed: {error}"));
+            self.pending_import_collection = None;
             return;
         }
-        match self.state.import_candidates(candidates, &mut summary) {
+        let target_collection = self.pending_import_collection.take();
+        match self
+            .state
+            .import_candidates(candidates, &mut summary, target_collection)
+        {
             Ok(()) => {
                 self.thumb_textures.clear();
                 self.import_message = Some(summary.message());
@@ -1006,7 +1226,10 @@ impl ChalkrawApp {
                 self.decoded_cache_order
                     .retain(|cached_id| *cached_id != id);
                 self.pending_decode_prefetch.remove(&id);
-                self.workbench_photos.remove(&id);
+                self.selected_photos.remove(&id);
+                if self.selection_anchor == Some(id) {
+                    self.selection_anchor = None;
+                }
                 self.thumb_textures.remove(&id);
                 self.cache_decoded_image(self.state.photo_id, self.state.image.clone());
                 if let Some(gpu) = self.gpu.as_ref() {
@@ -1028,6 +1251,10 @@ impl ChalkrawApp {
         source: ExportSource,
     ) -> anyhow::Result<Vec<chalkraw_export::BatchItem>> {
         match source {
+            ExportSource::Selected => {
+                let photos = self.selected_or_visible_export_photos();
+                self.state.batch_items_from_photos(photos, "selected")
+            }
             ExportSource::Current => {
                 let photos: Vec<Photo> = self
                     .state
@@ -1038,16 +1265,6 @@ impl ChalkrawApp {
                     .collect();
                 self.state.batch_items_from_photos(photos, "current")
             }
-            ExportSource::Workbench => {
-                let photos: Vec<Photo> = self
-                    .state
-                    .photos_cache
-                    .iter()
-                    .filter(|p| self.workbench_photos.contains(&p.id))
-                    .cloned()
-                    .collect();
-                self.state.batch_items_from_photos(photos, "workbench")
-            }
             ExportSource::Picks => self.state.collect_batch_items(true),
             ExportSource::All => self.state.collect_batch_items(false),
         }
@@ -1055,8 +1272,8 @@ impl ChalkrawApp {
 
     fn export_source_count(&self, source: ExportSource) -> usize {
         match source {
+            ExportSource::Selected => self.selected_or_visible_export_photos().len(),
             ExportSource::Current => usize::from(!self.state.photos_cache.is_empty()),
-            ExportSource::Workbench => self.workbench_photos.len(),
             ExportSource::Picks => self
                 .state
                 .photos_cache
@@ -1064,6 +1281,20 @@ impl ChalkrawApp {
                 .filter(|p| p.flag == Flag::Pick)
                 .count(),
             ExportSource::All => self.state.photos_cache.len(),
+        }
+    }
+
+    fn selected_or_visible_export_photos(&self) -> Vec<Photo> {
+        let visible = self.state.visible_photos();
+        let selected: Vec<Photo> = visible
+            .iter()
+            .filter(|photo| self.selected_photos.contains(&photo.id))
+            .cloned()
+            .collect();
+        if selected.is_empty() {
+            visible
+        } else {
+            selected
         }
     }
 
@@ -1122,7 +1353,7 @@ impl ChalkrawApp {
 
     fn show_library_grid(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Library");
+            ui.heading(self.state.active_collection_label());
             ui.separator();
             if ui.button("Import Photos...").clicked() {
                 if let Some(paths) = rfd::FileDialog::new()
@@ -1156,15 +1387,6 @@ impl ChalkrawApp {
                 self.mode = WorkspaceMode::Develop;
             }
         });
-        ui.horizontal(|ui| {
-            ui.label(format!("Workbench: {} photos", self.workbench_photos.len()));
-            if ui.button("Add Current").clicked() {
-                self.workbench_photos.insert(self.state.photo_id);
-            }
-            if ui.button("Clear Workbench").clicked() {
-                self.workbench_photos.clear();
-            }
-        });
         ui.separator();
         if let Some(summary) = self.state.filter_summary() {
             ui.horizontal(|ui| {
@@ -1177,9 +1399,7 @@ impl ChalkrawApp {
 
         let photos = self.state.visible_photos();
         if photos.is_empty() {
-            if self.state.folder_filter.is_some() {
-                ui.label("No photos in this folder.");
-            } else if self.state.collection_filter != CollectionFilter::All {
+            if self.state.collection_filter != CollectionFilter::All {
                 ui.label("No photos in this collection.");
             } else {
                 ui.label("No photos yet. File -> Import Photos / Import Folder...");
@@ -1188,6 +1408,28 @@ impl ChalkrawApp {
         }
 
         let current_id = self.state.photo_id;
+        let visible_ids: Vec<PhotoId> = photos.iter().map(|photo| photo.id).collect();
+        if ui.input(|i| i.key_pressed(egui::Key::A) && (i.modifiers.ctrl || i.modifiers.command)) {
+            select_all_visible(
+                &mut self.selected_photos,
+                &mut self.selection_anchor,
+                &visible_ids,
+            );
+        }
+        let selected_visible_count = visible_ids
+            .iter()
+            .filter(|id| self.selected_photos.contains(id))
+            .count();
+        ui.label(
+            egui::RichText::new(format!(
+                "{} photos | {} selected",
+                visible_ids.len(),
+                selected_visible_count
+            ))
+            .small()
+            .color(egui::Color32::GRAY),
+        );
+
         let tiles: Vec<(PhotoId, String, egui::TextureHandle, Flag)> = photos
             .iter()
             .map(|photo| {
@@ -1203,13 +1445,13 @@ impl ChalkrawApp {
 
         let mut clicked: Option<PhotoId> = None;
         let mut open_develop: Option<PhotoId> = None;
-        let mut toggle_workbench: Option<PhotoId> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for (photo_id, name, tex, flag) in &tiles {
                     ui.vertical(|ui| {
                         let img = egui::Image::new(tex).max_width(180.0).max_height(130.0);
                         let response = ui.add(img.sense(egui::Sense::click()));
+                        let is_selected = self.selected_photos.contains(photo_id);
                         let flag_color = match flag {
                             Flag::Pick => Some(egui::Color32::from_rgb(80, 200, 80)),
                             Flag::Reject => Some(egui::Color32::from_rgb(220, 80, 80)),
@@ -1223,6 +1465,14 @@ impl ChalkrawApp {
                                 egui::StrokeKind::Outside,
                             );
                         }
+                        if is_selected {
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                2.0,
+                                egui::Stroke::new(3.0, egui::Color32::from_rgb(80, 150, 240)),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
                         if *photo_id == current_id {
                             ui.painter().rect_stroke(
                                 response.rect,
@@ -1232,29 +1482,37 @@ impl ChalkrawApp {
                             );
                         }
                         if response.double_clicked() {
+                            apply_library_selection(
+                                &mut self.selected_photos,
+                                &mut self.selection_anchor,
+                                &visible_ids,
+                                *photo_id,
+                                SelectionModifiers::default(),
+                            );
                             open_develop = Some(*photo_id);
                         } else if response.clicked() {
+                            let modifiers = ui.input(|i| SelectionModifiers {
+                                ctrl: i.modifiers.ctrl || i.modifiers.command,
+                                shift: i.modifiers.shift,
+                            });
+                            apply_library_selection(
+                                &mut self.selected_photos,
+                                &mut self.selection_anchor,
+                                &visible_ids,
+                                *photo_id,
+                                modifiers,
+                            );
                             clicked = Some(*photo_id);
                         }
                         ui.add_sized(
                             [180.0, 18.0],
                             egui::Label::new(egui::RichText::new(name.as_str()).small()),
                         );
-                        let mut on_workbench = self.workbench_photos.contains(photo_id);
-                        if ui.checkbox(&mut on_workbench, "Workbench").changed() {
-                            toggle_workbench = Some(*photo_id);
-                        }
                     });
                     ui.add_space(8.0);
                 }
             });
         });
-
-        if let Some(photo_id) = toggle_workbench {
-            if !self.workbench_photos.remove(&photo_id) {
-                self.workbench_photos.insert(photo_id);
-            }
-        }
 
         let open_develop_requested = open_develop.is_some();
         let target = open_develop.or(clicked);
@@ -1468,7 +1726,7 @@ pub(crate) fn walk_dir(dir: &std::path::Path, extensions: &[&str], out: &mut Vec
 
 enum ImportPathResult {
     Candidate(ImportCandidate),
-    Duplicate,
+    Duplicate { hash: [u8; 32] },
     Failure { path: PathBuf, reason: String },
 }
 
@@ -1499,8 +1757,9 @@ fn process_import_paths(
                 summary.decoded += 1;
                 candidates.push(candidate);
             }
-            ImportPathResult::Duplicate => {
+            ImportPathResult::Duplicate { hash } => {
                 summary.duplicates += 1;
+                summary.duplicate_hashes.push(hash);
             }
             ImportPathResult::Failure { path, reason } => {
                 summary.record_failure(path, reason);
@@ -1542,7 +1801,7 @@ fn process_import_path(
         let mut known_hashes = known_hashes.lock().unwrap();
         if !known_hashes.insert(hash) {
             log::info!("skip {path:?}: already imported");
-            return ImportPathResult::Duplicate;
+            return ImportPathResult::Duplicate { hash };
         }
     }
 
@@ -1764,7 +2023,7 @@ impl eframe::App for ChalkrawApp {
                         )
                         .clicked()
                     {
-                        self.state.collection_filter = CollectionFilter::All;
+                        self.state.select_collection(CollectionFilter::All);
                     }
                     if ui
                         .selectable_label(
@@ -1773,7 +2032,7 @@ impl eframe::App for ChalkrawApp {
                         )
                         .clicked()
                     {
-                        self.state.collection_filter = CollectionFilter::Picks;
+                        self.state.select_collection(CollectionFilter::Picks);
                     }
                     if ui
                         .selectable_label(
@@ -1782,7 +2041,19 @@ impl eframe::App for ChalkrawApp {
                         )
                         .clicked()
                     {
-                        self.state.collection_filter = CollectionFilter::Rejected;
+                        self.state.select_collection(CollectionFilter::Rejected);
+                    }
+                    for collection in self.state.collections_cache.clone() {
+                        let filter = CollectionFilter::User(collection.id);
+                        if ui
+                            .selectable_label(
+                                self.state.collection_filter == filter,
+                                collection.name,
+                            )
+                            .clicked()
+                        {
+                            self.state.select_collection(filter);
+                        }
                     }
                 });
                 ui.menu_button("Develop", |ui| {
@@ -1872,9 +2143,7 @@ impl eframe::App for ChalkrawApp {
 
                     let photos = self.state.visible_photos();
                     if photos.is_empty() {
-                        if self.state.folder_filter.is_some() {
-                            ui.label("No photos in this folder.");
-                        } else if self.state.collection_filter != CollectionFilter::All {
+                        if self.state.collection_filter != CollectionFilter::All {
                             ui.label("No photos in this collection.");
                         } else {
                             ui.label("No photos yet. File → Import Photos / Import Folder…");
@@ -2072,8 +2341,8 @@ impl eframe::App for ChalkrawApp {
         });
 
         // ── Export dialog ─────────────────────────────────────────────────────
+        let export_count_selected = self.export_source_count(ExportSource::Selected);
         let export_count_current = self.export_source_count(ExportSource::Current);
-        let export_count_workbench = self.export_source_count(ExportSource::Workbench);
         let export_count_picks = self.export_source_count(ExportSource::Picks);
         let export_count_all = self.export_source_count(ExportSource::All);
         if let Some(dlg) = self.export_dialog.as_mut() {
@@ -2159,8 +2428,10 @@ impl eframe::App for ChalkrawApp {
                     ui.label("Source:");
                     ui.radio_value(
                         &mut dlg.source,
-                        ExportSource::Workbench,
-                        format!("Workbench / table ({export_count_workbench} photos)"),
+                        ExportSource::Selected,
+                        format!(
+                            "Selected / current collection ({export_count_selected} photos)"
+                        ),
                     );
                     ui.radio_value(
                         &mut dlg.source,
@@ -2332,8 +2603,8 @@ impl eframe::App for ChalkrawApp {
                             should_close = true;
                         }
                         let selected_count = match dlg.source {
+                            ExportSource::Selected => export_count_selected,
                             ExportSource::Current => export_count_current,
-                            ExportSource::Workbench => export_count_workbench,
                             ExportSource::Picks => export_count_picks,
                             ExportSource::All => export_count_all,
                         };
@@ -2952,5 +3223,65 @@ mod tests {
         assert_eq!(summary.decoded, 1);
         assert_eq!(summary.duplicates, 1);
         assert_eq!(summary.failed, 0);
+    }
+
+    #[test]
+    fn library_selection_supports_plain_ctrl_shift_and_select_all() {
+        let ids: Vec<PhotoId> = (1..=5).map(uuid::Uuid::from_u128).collect();
+        let mut selected = HashSet::new();
+        let mut anchor = None;
+
+        apply_library_selection(
+            &mut selected,
+            &mut anchor,
+            &ids,
+            ids[1],
+            SelectionModifiers::default(),
+        );
+        assert_eq!(selected, HashSet::from([ids[1]]));
+        assert_eq!(anchor, Some(ids[1]));
+
+        apply_library_selection(
+            &mut selected,
+            &mut anchor,
+            &ids,
+            ids[3],
+            SelectionModifiers {
+                ctrl: true,
+                shift: false,
+            },
+        );
+        assert_eq!(selected, HashSet::from([ids[1], ids[3]]));
+        assert_eq!(anchor, Some(ids[3]));
+
+        apply_library_selection(
+            &mut selected,
+            &mut anchor,
+            &ids,
+            ids[0],
+            SelectionModifiers {
+                ctrl: true,
+                shift: false,
+            },
+        );
+        assert_eq!(selected, HashSet::from([ids[0], ids[1], ids[3]]));
+        assert_eq!(anchor, Some(ids[0]));
+
+        apply_library_selection(
+            &mut selected,
+            &mut anchor,
+            &ids,
+            ids[2],
+            SelectionModifiers {
+                ctrl: false,
+                shift: true,
+            },
+        );
+        assert_eq!(selected, HashSet::from([ids[0], ids[1], ids[2]]));
+        assert_eq!(anchor, Some(ids[0]));
+
+        select_all_visible(&mut selected, &mut anchor, &ids);
+        assert_eq!(selected, ids.iter().copied().collect::<HashSet<_>>());
+        assert_eq!(anchor, Some(ids[0]));
     }
 }
