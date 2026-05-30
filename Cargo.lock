@@ -783,6 +783,7 @@ dependencies = [
  "env_logger",
  "image",
  "log",
+ "rayon",
  "rfd",
  "tempfile",
  "uuid",

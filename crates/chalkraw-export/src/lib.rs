@@ -9,6 +9,7 @@ use chalkraw_render::{
     BilateralPipeline, BlurPipeline, DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice,
     SourceTexture,
 };
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 // ── Public types ─────────────────────────────────────────────────────────────
@@ -111,6 +112,9 @@ struct ExportContext {
     bilat: BilateralPipeline,
     _display_lut_tex: wgpu::Texture,
     display_lut_view: wgpu::TextureView,
+    scratch: Option<ExportScratch>,
+    target: Option<ExportTarget>,
+    watermark_cache: WatermarkImageCache,
 }
 
 impl ExportContext {
@@ -130,7 +134,125 @@ impl ExportContext {
             bilat,
             _display_lut_tex,
             display_lut_view,
+            scratch: None,
+            target: None,
+            watermark_cache: WatermarkImageCache::default(),
         }
+    }
+
+    fn ensure_scratch(&mut self, rd: &RenderDevice, width: u32, height: u32) {
+        let matches_size = self
+            .scratch
+            .as_ref()
+            .map(|scratch| scratch.width == width && scratch.height == height)
+            .unwrap_or(false);
+        if !matches_size {
+            self.scratch = Some(ExportScratch::new(rd, width, height));
+        }
+    }
+
+    fn ensure_target(&mut self, rd: &RenderDevice, width: u32, height: u32) {
+        let matches_size = self
+            .target
+            .as_ref()
+            .map(|target| target.width == width && target.height == height)
+            .unwrap_or(false);
+        if !matches_size {
+            self.target = Some(ExportTarget::new(rd, width, height));
+        }
+    }
+}
+
+struct ExportScratch {
+    width: u32,
+    height: u32,
+    _clarity_tex_a: wgpu::Texture,
+    clarity_view_a: wgpu::TextureView,
+    _clarity_tex_b: wgpu::Texture,
+    clarity_view_b: wgpu::TextureView,
+    _sharp_tex_a: wgpu::Texture,
+    sharp_view_a: wgpu::TextureView,
+    _sharp_tex_b: wgpu::Texture,
+    sharp_view_b: wgpu::TextureView,
+    _texture_tex_a: wgpu::Texture,
+    texture_view_a: wgpu::TextureView,
+    _texture_tex_b: wgpu::Texture,
+    texture_view_b: wgpu::TextureView,
+    _nr_tex_a: wgpu::Texture,
+    _nr_view_a: wgpu::TextureView,
+    _nr_tex_b: wgpu::Texture,
+    nr_view_b: wgpu::TextureView,
+}
+
+impl ExportScratch {
+    fn new(rd: &RenderDevice, width: u32, height: u32) -> Self {
+        let (_clarity_tex_a, clarity_view_a, _clarity_tex_b, clarity_view_b) =
+            create_pingpong(rd, width, height);
+        let (_sharp_tex_a, sharp_view_a, _sharp_tex_b, sharp_view_b) =
+            create_pingpong(rd, width, height);
+        let (_texture_tex_a, texture_view_a, _texture_tex_b, texture_view_b) =
+            create_pingpong(rd, width, height);
+        let (_nr_tex_a, _nr_view_a, _nr_tex_b, nr_view_b) = create_pingpong(rd, width, height);
+
+        Self {
+            width,
+            height,
+            _clarity_tex_a,
+            clarity_view_a,
+            _clarity_tex_b,
+            clarity_view_b,
+            _sharp_tex_a,
+            sharp_view_a,
+            _sharp_tex_b,
+            sharp_view_b,
+            _texture_tex_a,
+            texture_view_a,
+            _texture_tex_b,
+            texture_view_b,
+            _nr_tex_a,
+            _nr_view_a,
+            _nr_tex_b,
+            nr_view_b,
+        }
+    }
+}
+
+struct ExportTarget {
+    width: u32,
+    height: u32,
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+impl ExportTarget {
+    fn new(rd: &RenderDevice, width: u32, height: u32) -> Self {
+        let (texture, view) = make_target(rd, width, height);
+        Self {
+            width,
+            height,
+            texture,
+            view,
+        }
+    }
+}
+
+#[derive(Default)]
+struct WatermarkImageCache {
+    images: HashMap<PathBuf, image::RgbaImage>,
+}
+
+impl WatermarkImageCache {
+    fn get(&mut self, path: &Path) -> Result<&image::RgbaImage, ExportError> {
+        let key = path.to_path_buf();
+        if !self.images.contains_key(&key) {
+            let bytes = std::fs::read(path)?;
+            let image = image::load_from_memory(&bytes)?.to_rgba8();
+            self.images.insert(key.clone(), image);
+        }
+        Ok(self
+            .images
+            .get(&key)
+            .expect("watermark image must be cached after insert"))
     }
 }
 
@@ -320,23 +442,25 @@ fn export_single_item(
 
     // Run Phase 2E blur passes and bilateral NR so Clarity, Texture, Sharpening, NR,
     // and Dehaze are correctly applied in the exported file. See export_current for rationale.
-    let (_, clarity_a, _, clarity_b) = create_pingpong(rd, image.width, image.height);
-    let (_, sharp_a, _, sharp_b) = create_pingpong(rd, image.width, image.height);
-    let (_, texture_a, _, texture_b) = create_pingpong(rd, image.width, image.height);
-    let (_, _nr_a, _, nr_b) = create_pingpong(rd, image.width, image.height);
+    ctx.ensure_scratch(rd, image.width, image.height);
+    ctx.ensure_target(rd, out_w, out_h);
+    let scratch = ctx
+        .scratch
+        .as_ref()
+        .expect("export scratch must be initialised");
 
     let sharp_sigma = item.edit.detail.sharpening.radius.max(0.5);
     ctx.blur.render_pass(
         &source.view,
-        &clarity_a,
+        &scratch.clarity_view_a,
         image.width,
         image.height,
         true,
         16.0,
     );
     ctx.blur.render_pass(
-        &clarity_a,
-        &clarity_b,
+        &scratch.clarity_view_a,
+        &scratch.clarity_view_b,
         image.width,
         image.height,
         false,
@@ -344,15 +468,15 @@ fn export_single_item(
     );
     ctx.blur.render_pass(
         &source.view,
-        &sharp_a,
+        &scratch.sharp_view_a,
         image.width,
         image.height,
         true,
         sharp_sigma,
     );
     ctx.blur.render_pass(
-        &sharp_a,
-        &sharp_b,
+        &scratch.sharp_view_a,
+        &scratch.sharp_view_b,
         image.width,
         image.height,
         false,
@@ -360,15 +484,15 @@ fn export_single_item(
     );
     ctx.blur.render_pass(
         &source.view,
-        &texture_a,
+        &scratch.texture_view_a,
         image.width,
         image.height,
         true,
         5.0,
     );
     ctx.blur.render_pass(
-        &texture_a,
-        &texture_b,
+        &scratch.texture_view_a,
+        &scratch.texture_view_b,
         image.width,
         image.height,
         false,
@@ -378,32 +502,43 @@ fn export_single_item(
         (item.edit.detail.noise_reduction.luminance + item.edit.detail.noise_reduction.color) / 2.0;
     let sigma_range = 0.01 + (nr_amount / 100.0) * 0.2;
     ctx.bilat
-        .render_pass(&source.view, &nr_b, 2.0, sigma_range, 3.0);
+        .render_pass(&source.view, &scratch.nr_view_b, 2.0, sigma_range, 3.0);
 
     // Build the tone-curve LUT from the current edit's point curve.
     // Export always uses an identity display LUT (no monitor ICC transform needed for file export).
     let (_lut_tex, lut_view) = make_tone_curve_lut(rd, &item.edit.tone_curve.rgb.0);
     let bind_group = ctx.pipeline.make_bind_group(
         &source,
-        &clarity_b,
-        &sharp_b,
-        &texture_b,
-        &nr_b,
+        &scratch.clarity_view_b,
+        &scratch.sharp_view_b,
+        &scratch.texture_view_b,
+        &scratch.nr_view_b,
         &lut_view,
         &ctx.display_lut_view,
     );
 
-    let (target, view) = make_target(rd, out_w, out_h);
-    ctx.pipeline.render(&view, &bind_group);
-    let mut pixels_rgba = read_to_cpu(rd, &target, out_w, out_h)?;
+    let target = ctx
+        .target
+        .as_ref()
+        .expect("export target must be initialised");
+    ctx.pipeline.render(&target.view, &bind_group);
+    let mut pixels_rgba = read_to_cpu(rd, &target.texture, out_w, out_h)?;
 
     if let Some(ref preset) = opts.watermark_preset {
-        if let Err(e) = apply_watermark_preset(&mut pixels_rgba, out_w, out_h, preset) {
+        if let Err(e) = apply_watermark_preset_with_cache(
+            &mut pixels_rgba,
+            out_w,
+            out_h,
+            preset,
+            &mut ctx.watermark_cache,
+        ) {
             log::warn!("watermark preset failed, exporting without stamp: {e}");
         }
     } else if let Some(ref wm) = opts.watermark {
         // Non-fatal: if the stamp fails, log and continue without it.
-        if let Err(e) = apply_watermark(&mut pixels_rgba, out_w, out_h, wm) {
+        if let Err(e) =
+            apply_watermark_with_cache(&mut pixels_rgba, out_w, out_h, wm, &mut ctx.watermark_cache)
+        {
             log::warn!("watermark failed, exporting without stamp: {e}");
         }
     }
@@ -421,6 +556,17 @@ pub fn apply_watermark_preset(
     base_h: u32,
     preset: &chalkraw_core::WatermarkPreset,
 ) -> Result<(), ExportError> {
+    let mut cache = WatermarkImageCache::default();
+    apply_watermark_preset_with_cache(base_rgba, base_w, base_h, preset, &mut cache)
+}
+
+fn apply_watermark_preset_with_cache(
+    base_rgba: &mut [u8],
+    base_w: u32,
+    base_h: u32,
+    preset: &chalkraw_core::WatermarkPreset,
+    cache: &mut WatermarkImageCache,
+) -> Result<(), ExportError> {
     for layer in &preset.layers {
         match layer {
             chalkraw_core::WatermarkLayer::Image(img_layer) => {
@@ -432,7 +578,7 @@ pub fn apply_watermark_preset(
                     margin_pct: img_layer.margin_pct,
                     rotation_deg: img_layer.rotation_deg,
                 };
-                apply_watermark(base_rgba, base_w, base_h, &stamp)?;
+                apply_watermark_with_cache(base_rgba, base_w, base_h, &stamp, cache)?;
             }
             chalkraw_core::WatermarkLayer::Text(text_layer) => {
                 apply_text_layer(base_rgba, base_w, base_h, text_layer)?;
@@ -528,22 +674,31 @@ fn map_anchor(a: chalkraw_core::WatermarkAnchor) -> WatermarkAnchor {
     }
 }
 
-fn apply_watermark(
+fn apply_watermark_with_cache(
     base_rgba: &mut [u8],
     base_w: u32,
     base_h: u32,
     stamp: &WatermarkStamp,
+    cache: &mut WatermarkImageCache,
 ) -> Result<(), ExportError> {
-    let wm_bytes = std::fs::read(&stamp.png_path)?;
-    let wm = image::load_from_memory(&wm_bytes)?.to_rgba8();
+    let wm = cache.get(&stamp.png_path)?;
+    apply_watermark_image(base_rgba, base_w, base_h, stamp, wm)
+}
 
+fn apply_watermark_image(
+    base_rgba: &mut [u8],
+    base_w: u32,
+    base_h: u32,
+    stamp: &WatermarkStamp,
+    wm: &image::RgbaImage,
+) -> Result<(), ExportError> {
     let long_edge = base_w.max(base_h) as f32;
     let target_long = (stamp.size_pct / 100.0 * long_edge).max(1.0) as u32;
     let (orig_w, orig_h) = wm.dimensions();
     let scale = target_long as f32 / (orig_w.max(orig_h) as f32);
     let new_w = ((orig_w as f32) * scale).max(1.0) as u32;
     let new_h = ((orig_h as f32) * scale).max(1.0) as u32;
-    let resized = image::imageops::resize(&wm, new_w, new_h, image::imageops::FilterType::Triangle);
+    let resized = image::imageops::resize(wm, new_w, new_h, image::imageops::FilterType::Triangle);
 
     // Apply rotation BEFORE positioning; re-read dimensions in case 90°/270° swaps them.
     let resized = if stamp.rotation_deg.abs() > 0.1 {

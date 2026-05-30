@@ -4,8 +4,10 @@ use chalkraw_catalog::Catalog;
 use chalkraw_core::{EditState, Flag, ImageFormat, Photo, PhotoId};
 use chalkraw_io::{decode_image, decode_image_bytes, LinearImage};
 use chalkraw_render::RenderDevice;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -993,9 +995,15 @@ pub(crate) fn walk_dir(dir: &std::path::Path, extensions: &[&str], out: &mut Vec
     }
 }
 
+enum ImportPathResult {
+    Candidate(ImportCandidate),
+    Duplicate,
+    Failure { path: PathBuf, reason: String },
+}
+
 fn process_import_paths(
     paths: Vec<PathBuf>,
-    mut known_hashes: HashSet<[u8; 32]>,
+    known_hashes: HashSet<[u8; 32]>,
     progress: &Arc<Mutex<ImportProgress>>,
 ) -> (Vec<ImportCandidate>, ImportSummary) {
     let total = paths.len();
@@ -1003,52 +1011,89 @@ fn process_import_paths(
         scanned: total,
         ..ImportSummary::default()
     };
-    let mut candidates = Vec::new();
-    for (idx, path) in paths.into_iter().enumerate() {
-        {
-            let mut p = progress.lock().unwrap();
-            p.current = idx + 1;
-            p.total = total;
-            p.name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
-        }
+    let known_hashes = Arc::new(Mutex::new(known_hashes));
+    let started = AtomicUsize::new(0);
+    let results: Vec<ImportPathResult> = paths
+        .into_par_iter()
+        .map(|path| {
+            let idx = started.fetch_add(1, Ordering::Relaxed) + 1;
+            process_import_path(path, idx, total, &known_hashes, progress)
+        })
+        .collect();
 
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(e) => {
-                log::warn!("skip {path:?}: {e}");
-                summary.record_failure(path, e.to_string());
-                continue;
+    let mut candidates = Vec::new();
+    for result in results {
+        match result {
+            ImportPathResult::Candidate(candidate) => {
+                summary.decoded += 1;
+                candidates.push(candidate);
             }
-        };
-        let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
-        if !known_hashes.insert(hash) {
-            log::info!("skip {path:?}: already imported");
-            summary.duplicates += 1;
-            continue;
+            ImportPathResult::Duplicate => {
+                summary.duplicates += 1;
+            }
+            ImportPathResult::Failure { path, reason } => {
+                summary.record_failure(path, reason);
+            }
         }
-        let img = match chalkraw_io::decode_image_from_bytes(&path, &bytes) {
-            Ok(i) => i,
-            Err(e) => {
-                log::warn!("skip {path:?}: {e}");
-                summary.record_failure(path, e.to_string());
-                continue;
-            }
-        };
-        summary.decoded += 1;
-        let thumbnail = chalkraw_io::make_thumbnail(&img).unwrap_or_default();
-        candidates.push(ImportCandidate {
-            path,
-            hash,
-            width: img.width,
-            height: img.height,
-            format: img.format,
-            thumbnail,
-        });
     }
     (candidates, summary)
+}
+
+fn process_import_path(
+    path: PathBuf,
+    idx: usize,
+    total: usize,
+    known_hashes: &Arc<Mutex<HashSet<[u8; 32]>>>,
+    progress: &Arc<Mutex<ImportProgress>>,
+) -> ImportPathResult {
+    {
+        let mut p = progress.lock().unwrap();
+        p.current = idx;
+        p.total = total;
+        p.name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+    }
+
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("skip {path:?}: {e}");
+            return ImportPathResult::Failure {
+                path,
+                reason: e.to_string(),
+            };
+        }
+    };
+    let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
+    {
+        let mut known_hashes = known_hashes.lock().unwrap();
+        if !known_hashes.insert(hash) {
+            log::info!("skip {path:?}: already imported");
+            return ImportPathResult::Duplicate;
+        }
+    }
+
+    let img = match chalkraw_io::decode_image_from_bytes(&path, &bytes) {
+        Ok(i) => i,
+        Err(e) => {
+            log::warn!("skip {path:?}: {e}");
+            return ImportPathResult::Failure {
+                path,
+                reason: e.to_string(),
+            };
+        }
+    };
+    let thumbnail = chalkraw_io::make_thumbnail(&img).unwrap_or_default();
+    ImportPathResult::Candidate(ImportCandidate {
+        path,
+        hash,
+        width: img.width,
+        height: img.height,
+        format: img.format,
+        thumbnail,
+    })
 }
 
 impl eframe::App for ChalkrawApp {
@@ -2351,6 +2396,33 @@ mod tests {
         assert!(candidates.is_empty());
         assert_eq!(summary.scanned, 1);
         assert_eq!(summary.decoded, 0);
+        assert_eq!(summary.duplicates, 1);
+        assert_eq!(summary.failed, 0);
+    }
+
+    #[test]
+    fn process_import_paths_deduplicates_within_same_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_a = dir.path().join("a.jpg");
+        let path_b = dir.path().join("b.jpg");
+        std::fs::write(&path_a, EMBEDDED_FIXTURE).unwrap();
+        std::fs::write(&path_b, EMBEDDED_FIXTURE).unwrap();
+        let progress = Arc::new(Mutex::new(ImportProgress {
+            current: 0,
+            total: 0,
+            name: String::new(),
+            done: false,
+            candidates: Vec::new(),
+            summary: ImportSummary::default(),
+            error: None,
+        }));
+
+        let (candidates, summary) =
+            process_import_paths(vec![path_a, path_b], HashSet::new(), &progress);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(summary.scanned, 2);
+        assert_eq!(summary.decoded, 1);
         assert_eq!(summary.duplicates, 1);
         assert_eq!(summary.failed, 0);
     }

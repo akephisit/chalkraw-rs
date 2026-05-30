@@ -27,6 +27,7 @@ log = { workspace = true }
 uuid = { workspace = true }
 blake3 = { workspace = true }
 rfd = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
