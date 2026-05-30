@@ -79,7 +79,7 @@ navigate without guessing what is happening.
   - Remove from catalog, without deleting the original file.
   - Reveal missing/original path state in the UI.
   - Relink missing file by choosing a replacement path.
-- [ ] Make folder and collection filters compose clearly:
+- [x] Make folder and collection filters compose clearly:
   - show active filter text near the filmstrip
   - add one-click clear filters action
   - keep navigation scoped to visible photos

@@ -346,6 +346,35 @@ impl AppState {
         photos
     }
 
+    pub fn has_active_filter(&self) -> bool {
+        self.folder_filter.is_some() || self.collection_filter != CollectionFilter::All
+    }
+
+    pub fn clear_filters(&mut self) {
+        self.folder_filter = None;
+        self.collection_filter = CollectionFilter::All;
+    }
+
+    pub fn filter_summary(&self) -> Option<String> {
+        if !self.has_active_filter() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if let Some(folder) = &self.folder_filter {
+            let label = folder
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| folder.display().to_string());
+            parts.push(format!("Folder: {label}"));
+        }
+        match self.collection_filter {
+            CollectionFilter::All => {}
+            CollectionFilter::Picks => parts.push("Collection: Picks".to_string()),
+            CollectionFilter::Rejected => parts.push("Collection: Rejected".to_string()),
+        }
+        Some(parts.join(" | "))
+    }
+
     /// Navigate to the next (+1) or previous (−1) photo in the catalog.
     /// Wraps around at both ends (Lightroom convention).
     pub fn navigate(&mut self, delta: i32) -> anyhow::Result<()> {
@@ -1292,6 +1321,15 @@ impl eframe::App for ChalkrawApp {
         egui::TopBottomPanel::bottom("filmstrip")
             .default_height(120.0)
             .show(ctx, |ui| {
+                if let Some(summary) = self.state.filter_summary() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Filter: {summary}"));
+                        if ui.button("Clear Filters").clicked() {
+                            self.state.clear_filters();
+                        }
+                    });
+                }
+
                 let photos = self.state.visible_photos();
                 if photos.is_empty() {
                     if self.state.folder_filter.is_some() {
