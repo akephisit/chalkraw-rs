@@ -700,8 +700,9 @@ impl ChalkrawApp {
             error: None,
         }));
         let progress_thread = progress.clone();
+        let known_hashes = self.state.photo_hashes.clone();
         std::thread::spawn(move || {
-            let (candidates, summary) = process_import_paths(paths, &progress_thread);
+            let (candidates, summary) = process_import_paths(paths, known_hashes, &progress_thread);
             let mut p = progress_thread.lock().unwrap();
             p.done = true;
             p.candidates = candidates;
@@ -726,6 +727,7 @@ impl ChalkrawApp {
             error: None,
         }));
         let progress_thread = progress.clone();
+        let known_hashes = self.state.photo_hashes.clone();
         std::thread::spawn(move || {
             let extensions = [
                 "jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef", "arw", "raf", "pef",
@@ -738,7 +740,7 @@ impl ChalkrawApp {
                 p.total = paths.len();
                 p.current = 0;
             }
-            let (candidates, summary) = process_import_paths(paths, &progress_thread);
+            let (candidates, summary) = process_import_paths(paths, known_hashes, &progress_thread);
             let mut p = progress_thread.lock().unwrap();
             p.done = true;
             p.candidates = candidates;
@@ -993,6 +995,7 @@ pub(crate) fn walk_dir(dir: &std::path::Path, extensions: &[&str], out: &mut Vec
 
 fn process_import_paths(
     paths: Vec<PathBuf>,
+    mut known_hashes: HashSet<[u8; 32]>,
     progress: &Arc<Mutex<ImportProgress>>,
 ) -> (Vec<ImportCandidate>, ImportSummary) {
     let total = paths.len();
@@ -1021,6 +1024,11 @@ fn process_import_paths(
             }
         };
         let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
+        if !known_hashes.insert(hash) {
+            log::info!("skip {path:?}: already imported");
+            summary.duplicates += 1;
+            continue;
+        }
         let img = match chalkraw_io::decode_image_from_bytes(&path, &bytes) {
             Ok(i) => i,
             Err(e) => {
@@ -2319,5 +2327,31 @@ mod tests {
         let mut out = Vec::new();
         walk_dir(dir.path(), &["jpg", "png", "cr2"], &mut out);
         assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn process_import_paths_skips_known_duplicate_before_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dup.jpg");
+        std::fs::write(&path, EMBEDDED_FIXTURE).unwrap();
+        let known_hash = *blake3::hash(EMBEDDED_FIXTURE).as_bytes();
+        let progress = Arc::new(Mutex::new(ImportProgress {
+            current: 0,
+            total: 0,
+            name: String::new(),
+            done: false,
+            candidates: Vec::new(),
+            summary: ImportSummary::default(),
+            error: None,
+        }));
+
+        let (candidates, summary) =
+            process_import_paths(vec![path], HashSet::from([known_hash]), &progress);
+
+        assert!(candidates.is_empty());
+        assert_eq!(summary.scanned, 1);
+        assert_eq!(summary.decoded, 0);
+        assert_eq!(summary.duplicates, 1);
+        assert_eq!(summary.failed, 0);
     }
 }
