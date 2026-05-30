@@ -5,13 +5,16 @@ use chalkraw_core::{EditState, Flag, ImageFormat, Photo, PhotoId};
 use chalkraw_io::{decode_image, decode_image_bytes, LinearImage};
 use chalkraw_render::RenderDevice;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const DEBOUNCE: Duration = Duration::from_millis(100);
+const DECODED_CACHE_CAPACITY: usize = 5;
+const GPU_CACHE_CAPACITY: usize = 3;
 
 /// Embedded sample image used when no fixture path is supplied or the
 /// supplied path doesn't exist.
@@ -25,6 +28,13 @@ pub enum CollectionFilter {
     All,
     Picks,
     Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspaceMode {
+    Library,
+    #[default]
+    Develop,
 }
 
 pub struct AppState {
@@ -139,6 +149,32 @@ impl AppState {
                 (p, EditState::default())
             }
         };
+
+        self.image = image;
+        self.photo_id = photo.id;
+        self.current_flag = photo.flag;
+        self.edit = edit;
+        self.dirty_since = None;
+        self.canvas_zoom = 1.0;
+        self.canvas_pan = egui::Vec2::ZERO;
+        Ok(())
+    }
+
+    pub fn switch_to_photo_with_image(
+        &mut self,
+        photo_id: PhotoId,
+        image: LinearImage,
+    ) -> anyhow::Result<()> {
+        self.dirty_since = Some(Instant::now() - DEBOUNCE);
+        self.flush_if_due();
+
+        let photo = self
+            .photos_cache
+            .iter()
+            .find(|p| p.id == photo_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("photo {photo_id} is not in the catalog"))?;
+        let edit = self.catalog.get_edit(photo.id)?;
 
         self.image = image;
         self.photo_id = photo.id;
@@ -377,20 +413,30 @@ impl AppState {
         Some(parts.join(" | "))
     }
 
-    /// Navigate to the next (+1) or previous (−1) photo in the catalog.
-    /// Wraps around at both ends (Lightroom convention).
-    pub fn navigate(&mut self, delta: i32) -> anyhow::Result<()> {
+    pub fn photo_at_offset(&self, delta: i32) -> Option<Photo> {
         let photos = self.visible_photos();
         if photos.is_empty() {
-            return Ok(());
+            return None;
         }
         let current_idx = photos
             .iter()
             .position(|p| p.id == self.photo_id)
             .unwrap_or(0);
         let new_idx = ((current_idx as i32 + delta).rem_euclid(photos.len() as i32)) as usize;
-        let new_path = photos[new_idx].original_path.clone();
-        self.switch_to_path(new_path)
+        photos.get(new_idx).cloned()
+    }
+
+    pub fn neighbor_photos(&self) -> Vec<Photo> {
+        let mut neighbors = Vec::new();
+        for delta in [1, -1] {
+            if let Some(photo) = self.photo_at_offset(delta) {
+                if photo.id != self.photo_id && !neighbors.iter().any(|p: &Photo| p.id == photo.id)
+                {
+                    neighbors.push(photo);
+                }
+            }
+        }
+        neighbors
     }
 
     /// Gather batch items from the catalog. If `only_picks` is true, filters to
@@ -647,7 +693,15 @@ impl Default for ExportDialogState {
 
 pub struct ChalkrawApp {
     state: AppState,
+    mode: WorkspaceMode,
     gpu: Option<Arc<CanvasGpu>>,
+    gpu_cache: HashMap<PhotoId, Arc<CanvasGpu>>,
+    gpu_cache_order: VecDeque<PhotoId>,
+    decoded_cache: HashMap<PhotoId, LinearImage>,
+    decoded_cache_order: VecDeque<PhotoId>,
+    decode_prefetch_tx: Sender<(PhotoId, Result<LinearImage, String>)>,
+    decode_prefetch_rx: Receiver<(PhotoId, Result<LinearImage, String>)>,
+    pending_decode_prefetch: HashSet<PhotoId>,
     thumb_textures: HashMap<PhotoId, egui::TextureHandle>,
     export_dialog: Option<ExportDialogState>,
     import_progress: Option<Arc<Mutex<ImportProgress>>>,
@@ -674,9 +728,22 @@ impl ChalkrawApp {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("default.chalkraw"));
         let state = AppState::bootstrap(fixture, catalog_path)?;
+        let mut decoded_cache = HashMap::new();
+        let mut decoded_cache_order = VecDeque::new();
+        decoded_cache.insert(state.photo_id, state.image.clone());
+        decoded_cache_order.push_back(state.photo_id);
+        let (decode_prefetch_tx, decode_prefetch_rx) = mpsc::channel();
         Ok(Self {
             state,
+            mode: WorkspaceMode::Develop,
             gpu: None,
+            gpu_cache: HashMap::new(),
+            gpu_cache_order: VecDeque::new(),
+            decoded_cache,
+            decoded_cache_order,
+            decode_prefetch_tx,
+            decode_prefetch_rx,
+            pending_decode_prefetch: HashSet::new(),
             thumb_textures: HashMap::new(),
             export_dialog: None,
             import_progress: None,
@@ -788,6 +855,12 @@ impl ChalkrawApp {
         if self.gpu.is_some() {
             return;
         }
+        if let Some(gpu) = self.gpu_cache.get(&self.state.photo_id).cloned() {
+            Self::refresh_gpu_for_edit(&gpu, &self.state.edit);
+            self.touch_gpu_cache(self.state.photo_id);
+            self.gpu = Some(gpu);
+            return;
+        }
         let render_state = match frame.wgpu_render_state() {
             Some(rs) => rs,
             None => return,
@@ -810,8 +883,278 @@ impl ChalkrawApp {
         let format = render_state.target_format;
         log::info!("wgpu surface target_format = {format:?}");
         let gpu = CanvasGpu::new(&rd, &self.state.image, format);
-        gpu.update(&self.state.edit);
-        self.gpu = Some(Arc::new(gpu));
+        Self::refresh_gpu_for_edit(&gpu, &self.state.edit);
+        let gpu = Arc::new(gpu);
+        self.cache_gpu(self.state.photo_id, gpu.clone());
+        self.gpu = Some(gpu);
+    }
+
+    fn refresh_gpu_for_edit(gpu: &CanvasGpu, edit: &EditState) {
+        gpu.update(edit);
+        gpu.upload_tone_curve(&edit.tone_curve.rgb.0);
+        let nr_amount =
+            (edit.detail.noise_reduction.luminance + edit.detail.noise_reduction.color) / 2.0;
+        gpu.run_blurs(16.0, edit.detail.sharpening.radius, 5.0, nr_amount);
+    }
+
+    fn touch_decoded_cache(&mut self, photo_id: PhotoId) {
+        self.decoded_cache_order.retain(|id| *id != photo_id);
+        self.decoded_cache_order.push_back(photo_id);
+    }
+
+    fn cache_decoded_image(&mut self, photo_id: PhotoId, image: LinearImage) {
+        self.decoded_cache.insert(photo_id, image);
+        self.touch_decoded_cache(photo_id);
+        while self.decoded_cache.len() > DECODED_CACHE_CAPACITY {
+            let Some(oldest) = self.decoded_cache_order.pop_front() else {
+                break;
+            };
+            if oldest == self.state.photo_id {
+                self.decoded_cache_order.push_back(oldest);
+                continue;
+            }
+            self.decoded_cache.remove(&oldest);
+        }
+    }
+
+    fn touch_gpu_cache(&mut self, photo_id: PhotoId) {
+        self.gpu_cache_order.retain(|id| *id != photo_id);
+        self.gpu_cache_order.push_back(photo_id);
+    }
+
+    fn cache_gpu(&mut self, photo_id: PhotoId, gpu: Arc<CanvasGpu>) {
+        self.gpu_cache.insert(photo_id, gpu);
+        self.touch_gpu_cache(photo_id);
+        while self.gpu_cache.len() > GPU_CACHE_CAPACITY {
+            let Some(oldest) = self.gpu_cache_order.pop_front() else {
+                break;
+            };
+            if oldest == self.state.photo_id {
+                self.gpu_cache_order.push_back(oldest);
+                continue;
+            }
+            self.gpu_cache.remove(&oldest);
+        }
+    }
+
+    fn open_photo_path(&mut self, path: PathBuf) -> anyhow::Result<()> {
+        self.state.switch_to_path(path)?;
+        self.cache_decoded_image(self.state.photo_id, self.state.image.clone());
+        self.gpu = self.gpu_cache.get(&self.state.photo_id).cloned();
+        if let Some(gpu) = self.gpu.as_ref() {
+            Self::refresh_gpu_for_edit(gpu, &self.state.edit);
+        }
+        self.schedule_neighbor_decode_prefetch();
+        Ok(())
+    }
+
+    fn switch_to_photo_id(&mut self, photo_id: PhotoId) -> anyhow::Result<()> {
+        let image = if let Some(image) = self.decoded_cache.get(&photo_id).cloned() {
+            self.touch_decoded_cache(photo_id);
+            image
+        } else {
+            let photo = self
+                .state
+                .photos_cache
+                .iter()
+                .find(|p| p.id == photo_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("photo {photo_id} is not in the catalog"))?;
+            let image = decode_image(&photo.original_path)
+                .map_err(|e| anyhow::anyhow!("decode {:?}: {e}", photo.original_path))?;
+            self.cache_decoded_image(photo_id, image.clone());
+            image
+        };
+        self.state.switch_to_photo_with_image(photo_id, image)?;
+        self.gpu = self.gpu_cache.get(&photo_id).cloned();
+        if let Some(gpu) = self.gpu.as_ref() {
+            Self::refresh_gpu_for_edit(gpu, &self.state.edit);
+        }
+        self.schedule_neighbor_decode_prefetch();
+        Ok(())
+    }
+
+    fn remove_current_photo_from_catalog(&mut self) {
+        match self.state.remove_current_photo_from_catalog() {
+            Ok(id) => {
+                self.gpu = self.gpu_cache.get(&self.state.photo_id).cloned();
+                self.gpu_cache.remove(&id);
+                self.gpu_cache_order.retain(|cached_id| *cached_id != id);
+                self.decoded_cache.remove(&id);
+                self.decoded_cache_order
+                    .retain(|cached_id| *cached_id != id);
+                self.pending_decode_prefetch.remove(&id);
+                self.thumb_textures.remove(&id);
+                self.cache_decoded_image(self.state.photo_id, self.state.image.clone());
+                if let Some(gpu) = self.gpu.as_ref() {
+                    Self::refresh_gpu_for_edit(gpu, &self.state.edit);
+                }
+                self.import_message =
+                    Some("Removed current photo from catalog; original file kept".to_string());
+                self.schedule_neighbor_decode_prefetch();
+            }
+            Err(e) => {
+                self.import_message = Some(format!("Remove failed: {e}"));
+                log::warn!("remove current photo failed: {e}");
+            }
+        }
+    }
+
+    fn collect_decode_prefetch_results(&mut self) {
+        while let Ok((photo_id, result)) = self.decode_prefetch_rx.try_recv() {
+            self.pending_decode_prefetch.remove(&photo_id);
+            match result {
+                Ok(image) => self.cache_decoded_image(photo_id, image),
+                Err(e) => log::debug!("decode prefetch skipped for {photo_id}: {e}"),
+            }
+        }
+    }
+
+    fn schedule_neighbor_decode_prefetch(&mut self) {
+        for photo in self.state.neighbor_photos() {
+            if self.decoded_cache.contains_key(&photo.id)
+                || self.pending_decode_prefetch.contains(&photo.id)
+                || photo.original_path.as_os_str() == "<embedded>"
+                || !photo.original_path.exists()
+            {
+                continue;
+            }
+            let tx = self.decode_prefetch_tx.clone();
+            let photo_id = photo.id;
+            let path = photo.original_path.clone();
+            self.pending_decode_prefetch.insert(photo_id);
+            std::thread::spawn(move || {
+                let result = decode_image(&path).map_err(|e| format!("decode {path:?}: {e}"));
+                let _ = tx.send((photo_id, result));
+            });
+        }
+    }
+
+    fn prefetch_one_neighbor_gpu(&mut self, frame: &eframe::Frame) {
+        let Some(render_state) = frame.wgpu_render_state() else {
+            return;
+        };
+        let Some(photo) = self
+            .state
+            .neighbor_photos()
+            .into_iter()
+            .find(|photo| !self.gpu_cache.contains_key(&photo.id))
+        else {
+            return;
+        };
+        let Some(image) = self.decoded_cache.get(&photo.id) else {
+            return;
+        };
+        let rd = RenderDevice::from_shared(
+            Arc::new(render_state.device.clone()),
+            Arc::new(render_state.queue.clone()),
+        );
+        let gpu = Arc::new(CanvasGpu::new(&rd, image, render_state.target_format));
+        self.cache_gpu(photo.id, gpu);
+    }
+
+    fn show_library_grid(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Library");
+            ui.separator();
+            ui.add_enabled_ui(self.state.photos_cache.len() > 1, |ui| {
+                if ui.button("Remove Current From Catalog").clicked() {
+                    self.remove_current_photo_from_catalog();
+                }
+            });
+            if ui.button("Develop").clicked() {
+                self.mode = WorkspaceMode::Develop;
+            }
+        });
+        ui.separator();
+        if let Some(summary) = self.state.filter_summary() {
+            ui.horizontal(|ui| {
+                ui.label(format!("Filter: {summary}"));
+                if ui.button("Clear Filters").clicked() {
+                    self.state.clear_filters();
+                }
+            });
+        }
+
+        let photos = self.state.visible_photos();
+        if photos.is_empty() {
+            if self.state.folder_filter.is_some() {
+                ui.label("No photos in this folder.");
+            } else if self.state.collection_filter != CollectionFilter::All {
+                ui.label("No photos in this collection.");
+            } else {
+                ui.label("No photos yet. File -> Import Photos / Import Folder...");
+            }
+            return;
+        }
+
+        let current_id = self.state.photo_id;
+        let tiles: Vec<(PhotoId, String, egui::TextureHandle, Flag)> = photos
+            .iter()
+            .map(|photo| {
+                let name = photo
+                    .original_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| photo.original_path.display().to_string());
+                let tex = self.ensure_thumb(ctx, photo);
+                (photo.id, name, tex, photo.flag)
+            })
+            .collect();
+
+        let mut clicked: Option<PhotoId> = None;
+        let mut open_develop: Option<PhotoId> = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (photo_id, name, tex, flag) in &tiles {
+                    ui.vertical(|ui| {
+                        let img = egui::Image::new(tex).max_width(180.0).max_height(130.0);
+                        let response = ui.add(img.sense(egui::Sense::click()));
+                        let flag_color = match flag {
+                            Flag::Pick => Some(egui::Color32::from_rgb(80, 200, 80)),
+                            Flag::Reject => Some(egui::Color32::from_rgb(220, 80, 80)),
+                            Flag::None => None,
+                        };
+                        if let Some(c) = flag_color {
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                2.0,
+                                egui::Stroke::new(2.0, c),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                        if *photo_id == current_id {
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                2.0,
+                                egui::Stroke::new(2.0, egui::Color32::from_rgb(220, 200, 60)),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                        if response.double_clicked() {
+                            open_develop = Some(*photo_id);
+                        } else if response.clicked() {
+                            clicked = Some(*photo_id);
+                        }
+                        ui.add_sized(
+                            [180.0, 18.0],
+                            egui::Label::new(egui::RichText::new(name.as_str()).small()),
+                        );
+                    });
+                    ui.add_space(8.0);
+                }
+            });
+        });
+
+        let open_develop_requested = open_develop.is_some();
+        let target = open_develop.or(clicked);
+        if let Some(photo_id) = target {
+            if let Err(e) = self.switch_to_photo_id(photo_id) {
+                log::warn!("library selection failed: {e}");
+            } else if open_develop_requested {
+                self.mode = WorkspaceMode::Develop;
+            }
+        }
     }
 
     fn ensure_thumb(&mut self, ctx: &egui::Context, photo: &Photo) -> egui::TextureHandle {
@@ -1098,6 +1441,7 @@ fn process_import_path(
 
 impl eframe::App for ChalkrawApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.collect_decode_prefetch_results();
         self.finish_import_if_ready();
         if self.import_progress.is_none() {
             if let Some(dir) = self.state.take_due_watch_folder_scan() {
@@ -1105,6 +1449,8 @@ impl eframe::App for ChalkrawApp {
             }
         }
         self.ensure_gpu(frame);
+        self.schedule_neighbor_decode_prefetch();
+        self.prefetch_one_neighbor_gpu(frame);
 
         let mut to_set: Option<Flag> = None;
         let mut nav: Option<i32> = None;
@@ -1129,16 +1475,19 @@ impl eframe::App for ChalkrawApp {
             self.state.set_current_flag(f);
         }
         if let Some(delta) = nav {
-            if let Err(e) = self.state.navigate(delta) {
-                log::warn!("navigate failed: {e}");
-            } else {
-                self.gpu = None; // force CanvasGpu rebuild for new source
+            if let Some(photo) = self.state.photo_at_offset(delta) {
+                if let Err(e) = self.switch_to_photo_id(photo.id) {
+                    log::warn!("navigate failed: {e}");
+                }
             }
         }
 
         let mut edit_change = EditChange::default();
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
+                ui.selectable_value(&mut self.mode, WorkspaceMode::Library, "Library");
+                ui.selectable_value(&mut self.mode, WorkspaceMode::Develop, "Develop");
+                ui.separator();
                 ui.menu_button("File", |ui| {
                     if ui.button("Open Photo…").clicked() {
                         ui.close();
@@ -1152,10 +1501,9 @@ impl eframe::App for ChalkrawApp {
                             )
                             .pick_file()
                         {
-                            if let Err(e) = self.state.switch_to_path(path) {
+                            if let Err(e) = self.open_photo_path(path) {
                                 log::warn!("open photo failed: {e}");
                             } else {
-                                self.gpu = None;
                                 self.thumb_textures.clear();
                             }
                         }
@@ -1202,6 +1550,10 @@ impl eframe::App for ChalkrawApp {
                     }
                 });
                 ui.menu_button("Library", |ui| {
+                    if ui.button("Show Library Workspace").clicked() {
+                        ui.close();
+                        self.mode = WorkspaceMode::Library;
+                    }
                     if ui.button("Import Photos…").clicked() {
                         ui.close();
                         if let Some(paths) = rfd::FileDialog::new()
@@ -1253,7 +1605,13 @@ impl eframe::App for ChalkrawApp {
                             match self.state.relink_current_photo(path) {
                                 Ok(id) => {
                                     self.gpu = None;
+                                    self.gpu_cache.remove(&id);
+                                    self.gpu_cache_order.retain(|cached_id| *cached_id != id);
+                                    self.decoded_cache.remove(&id);
+                                    self.decoded_cache_order
+                                        .retain(|cached_id| *cached_id != id);
                                     self.thumb_textures.remove(&id);
+                                    self.cache_decoded_image(id, self.state.image.clone());
                                     self.import_message =
                                         Some("Relinked current photo".to_string());
                                 }
@@ -1267,20 +1625,7 @@ impl eframe::App for ChalkrawApp {
                     ui.add_enabled_ui(self.state.photos_cache.len() > 1, |ui| {
                         if ui.button("Remove Current From Catalog").clicked() {
                             ui.close();
-                            match self.state.remove_current_photo_from_catalog() {
-                                Ok(id) => {
-                                    self.gpu = None;
-                                    self.thumb_textures.remove(&id);
-                                    self.import_message = Some(
-                                        "Removed current photo from catalog; original file kept"
-                                            .to_string(),
-                                    );
-                                }
-                                Err(e) => {
-                                    self.import_message = Some(format!("Remove failed: {e}"));
-                                    log::warn!("remove current photo failed: {e}");
-                                }
-                            }
+                            self.remove_current_photo_from_catalog();
                         }
                     });
                     ui.separator();
@@ -1313,6 +1658,10 @@ impl eframe::App for ChalkrawApp {
                     }
                 });
                 ui.menu_button("Develop", |ui| {
+                    if ui.button("Show Develop Workspace").clicked() {
+                        ui.close();
+                        self.mode = WorkspaceMode::Develop;
+                    }
                     if ui.button("Reset All Edits").clicked() {
                         ui.close();
                         self.state.edit = EditState::default();
@@ -1330,6 +1679,13 @@ impl eframe::App for ChalkrawApp {
                         self.state.canvas_zoom = 1.0;
                         self.state.canvas_pan = egui::Vec2::ZERO;
                     }
+                    ui.separator();
+                    ui.add_enabled_ui(self.state.photos_cache.len() > 1, |ui| {
+                        if ui.button("Remove Current From Catalog").clicked() {
+                            ui.close();
+                            self.remove_current_photo_from_catalog();
+                        }
+                    });
                 });
                 ui.menu_button("Export", |ui| {
                     if ui.button("Batch Export…").clicked() {
@@ -1363,87 +1719,92 @@ impl eframe::App for ChalkrawApp {
                 }
             });
 
-        egui::SidePanel::right("right")
-            .default_width(280.0)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    edit_change.merge(right_panel(ui, &mut self.state.edit));
-                });
-            });
-
-        egui::TopBottomPanel::bottom("filmstrip")
-            .default_height(120.0)
-            .show(ctx, |ui| {
-                if let Some(summary) = self.state.filter_summary() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Filter: {summary}"));
-                        if ui.button("Clear Filters").clicked() {
-                            self.state.clear_filters();
-                        }
-                    });
-                }
-
-                let photos = self.state.visible_photos();
-                if photos.is_empty() {
-                    if self.state.folder_filter.is_some() {
-                        ui.label("No photos in this folder.");
-                    } else if self.state.collection_filter != CollectionFilter::All {
-                        ui.label("No photos in this collection.");
-                    } else {
-                        ui.label("No photos yet. File → Import Photos / Import Folder…");
-                    }
-                    return;
-                }
-                let current_id = self.state.photo_id;
-                let mut clicked: Option<PathBuf> = None;
-                let thumbs: Vec<(PhotoId, PathBuf, egui::TextureHandle, Flag)> = photos
-                    .iter()
-                    .map(|p| {
-                        let tex = self.ensure_thumb(ctx, p);
-                        (p.id, p.original_path.clone(), tex, p.flag)
-                    })
-                    .collect();
-                egui::ScrollArea::horizontal().show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for (pid, path, tex, flag) in &thumbs {
-                            let is_current = *pid == current_id;
-                            let img = egui::Image::new(tex).max_height(100.0).max_width(140.0);
-                            let response = ui.add(img.sense(egui::Sense::click()));
-                            let flag_color = match flag {
-                                Flag::Pick => Some(egui::Color32::from_rgb(80, 200, 80)),
-                                Flag::Reject => Some(egui::Color32::from_rgb(220, 80, 80)),
-                                Flag::None => None,
-                            };
-                            if let Some(c) = flag_color {
-                                ui.painter().rect_stroke(
-                                    response.rect,
-                                    2.0,
-                                    egui::Stroke::new(2.0, c),
-                                    egui::StrokeKind::Outside,
-                                );
-                            }
-                            if is_current {
-                                ui.painter().rect_stroke(
-                                    response.rect,
-                                    2.0,
-                                    egui::Stroke::new(2.0, egui::Color32::from_rgb(220, 200, 60)),
-                                    egui::StrokeKind::Outside,
-                                );
-                            }
-                            if response.clicked() {
-                                clicked = Some(path.clone());
-                            }
-                        }
+        if self.mode == WorkspaceMode::Develop {
+            egui::SidePanel::right("right")
+                .default_width(280.0)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        edit_change.merge(right_panel(ui, &mut self.state.edit));
                     });
                 });
-                if let Some(path) = clicked {
-                    if let Err(e) = self.state.switch_to_path(path) {
-                        log::warn!("switch_to_path failed: {e}");
-                    } else {
-                        self.gpu = None;
+        }
+
+        if self.mode == WorkspaceMode::Develop {
+            egui::TopBottomPanel::bottom("filmstrip")
+                .default_height(120.0)
+                .show(ctx, |ui| {
+                    if let Some(summary) = self.state.filter_summary() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Filter: {summary}"));
+                            if ui.button("Clear Filters").clicked() {
+                                self.state.clear_filters();
+                            }
+                        });
                     }
-                }
-            });
+
+                    let photos = self.state.visible_photos();
+                    if photos.is_empty() {
+                        if self.state.folder_filter.is_some() {
+                            ui.label("No photos in this folder.");
+                        } else if self.state.collection_filter != CollectionFilter::All {
+                            ui.label("No photos in this collection.");
+                        } else {
+                            ui.label("No photos yet. File → Import Photos / Import Folder…");
+                        }
+                        return;
+                    }
+                    let current_id = self.state.photo_id;
+                    let mut clicked: Option<PhotoId> = None;
+                    let thumbs: Vec<(PhotoId, egui::TextureHandle, Flag)> = photos
+                        .iter()
+                        .map(|p| {
+                            let tex = self.ensure_thumb(ctx, p);
+                            (p.id, tex, p.flag)
+                        })
+                        .collect();
+                    egui::ScrollArea::horizontal().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for (pid, tex, flag) in &thumbs {
+                                let is_current = *pid == current_id;
+                                let img = egui::Image::new(tex).max_height(100.0).max_width(140.0);
+                                let response = ui.add(img.sense(egui::Sense::click()));
+                                let flag_color = match flag {
+                                    Flag::Pick => Some(egui::Color32::from_rgb(80, 200, 80)),
+                                    Flag::Reject => Some(egui::Color32::from_rgb(220, 80, 80)),
+                                    Flag::None => None,
+                                };
+                                if let Some(c) = flag_color {
+                                    ui.painter().rect_stroke(
+                                        response.rect,
+                                        2.0,
+                                        egui::Stroke::new(2.0, c),
+                                        egui::StrokeKind::Outside,
+                                    );
+                                }
+                                if is_current {
+                                    ui.painter().rect_stroke(
+                                        response.rect,
+                                        2.0,
+                                        egui::Stroke::new(
+                                            2.0,
+                                            egui::Color32::from_rgb(220, 200, 60),
+                                        ),
+                                        egui::StrokeKind::Outside,
+                                    );
+                                }
+                                if response.clicked() {
+                                    clicked = Some(*pid);
+                                }
+                            }
+                        });
+                    });
+                    if let Some(photo_id) = clicked {
+                        if let Err(e) = self.switch_to_photo_id(photo_id) {
+                            log::warn!("switch_to_photo_id failed: {e}");
+                        }
+                    }
+                });
+        }
 
         // Phase 5C: snapshot the working preset (if the editor is open) so we can
         // draw the overlay inside the CentralPanel closure without conflicting
@@ -1454,6 +1815,16 @@ impl eframe::App for ChalkrawApp {
         let image_h = self.state.image.height;
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            if self.mode == WorkspaceMode::Library {
+                if edit_change.any() {
+                    if let Some(gpu) = self.gpu.as_ref() {
+                        Self::refresh_gpu_for_edit(gpu, &self.state.edit);
+                    }
+                    self.state.mark_dirty();
+                }
+                self.show_library_grid(ctx, ui);
+                return;
+            }
             if let Some(gpu) = self.gpu.as_ref() {
                 if edit_change.any() {
                     if edit_change.uniforms {
