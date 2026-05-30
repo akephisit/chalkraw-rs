@@ -148,11 +148,16 @@ impl AppState {
         Ok(())
     }
 
-    pub fn import_candidates(&mut self, candidates: Vec<ImportCandidate>) -> anyhow::Result<usize> {
+    pub fn import_candidates(
+        &mut self,
+        candidates: Vec<ImportCandidate>,
+        summary: &mut ImportSummary,
+    ) -> anyhow::Result<()> {
         let mut photos = Vec::new();
         for c in candidates {
             if self.photo_hashes.contains(&c.hash) {
                 log::info!("skip {:?}: already imported", c.path);
+                summary.duplicates += 1;
                 continue;
             }
             self.photo_hashes.insert(c.hash);
@@ -163,7 +168,8 @@ impl AppState {
         let inserted = photos.len();
         self.catalog.insert_photos(&photos)?;
         self.photos_cache.extend(photos);
-        Ok(inserted)
+        summary.inserted += inserted;
+        Ok(())
     }
 
     pub fn set_current_flag(&mut self, flag: Flag) {
@@ -318,12 +324,69 @@ pub struct ImportCandidate {
     thumbnail: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+struct ImportFailure {
+    path: PathBuf,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ImportSummary {
+    scanned: usize,
+    decoded: usize,
+    inserted: usize,
+    duplicates: usize,
+    failed: usize,
+    failures: Vec<ImportFailure>,
+}
+
+impl ImportSummary {
+    fn record_failure(&mut self, path: PathBuf, reason: impl Into<String>) {
+        self.failed += 1;
+        if self.failures.len() < 5 {
+            self.failures.push(ImportFailure {
+                path,
+                reason: reason.into(),
+            });
+        }
+    }
+
+    fn message(&self) -> String {
+        let mut message = format!(
+            "Import complete: scanned {}, decoded {}, inserted {}, duplicates {}, failed {}",
+            self.scanned, self.decoded, self.inserted, self.duplicates, self.failed
+        );
+        if !self.failures.is_empty() {
+            let failures = self
+                .failures
+                .iter()
+                .map(|failure| {
+                    let name = failure
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| failure.path.display().to_string());
+                    format!("{name}: {}", failure.reason)
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            message.push_str(" | ");
+            message.push_str(&failures);
+            if self.failed > self.failures.len() {
+                message.push_str(&format!("; +{} more", self.failed - self.failures.len()));
+            }
+        }
+        message
+    }
+}
+
 struct ImportProgress {
     current: usize,
     total: usize,
     name: String,
     done: bool,
     candidates: Vec<ImportCandidate>,
+    summary: ImportSummary,
     error: Option<String>,
 }
 
@@ -508,14 +571,16 @@ impl ChalkrawApp {
             name: String::new(),
             done: false,
             candidates: Vec::new(),
+            summary: ImportSummary::default(),
             error: None,
         }));
         let progress_thread = progress.clone();
         std::thread::spawn(move || {
-            let candidates = process_import_paths(paths, &progress_thread);
+            let (candidates, summary) = process_import_paths(paths, &progress_thread);
             let mut p = progress_thread.lock().unwrap();
             p.done = true;
             p.candidates = candidates;
+            p.summary = summary;
         });
         self.import_progress = Some(progress);
         self.import_message = Some(format!("{label}: queued import"));
@@ -532,6 +597,7 @@ impl ChalkrawApp {
             name: dir.display().to_string(),
             done: false,
             candidates: Vec::new(),
+            summary: ImportSummary::default(),
             error: None,
         }));
         let progress_thread = progress.clone();
@@ -547,10 +613,11 @@ impl ChalkrawApp {
                 p.total = paths.len();
                 p.current = 0;
             }
-            let candidates = process_import_paths(paths, &progress_thread);
+            let (candidates, summary) = process_import_paths(paths, &progress_thread);
             let mut p = progress_thread.lock().unwrap();
             p.done = true;
             p.candidates = candidates;
+            p.summary = summary;
         });
         self.import_progress = Some(progress);
         self.import_message = Some(format!("{label}: scanning folder"));
@@ -565,18 +632,22 @@ impl ChalkrawApp {
             return;
         }
         let progress_arc = self.import_progress.take().unwrap();
-        let (candidates, error) = {
+        let (candidates, mut summary, error) = {
             let mut p = progress_arc.lock().unwrap();
-            (std::mem::take(&mut p.candidates), p.error.clone())
+            (
+                std::mem::take(&mut p.candidates),
+                std::mem::take(&mut p.summary),
+                p.error.clone(),
+            )
         };
         if let Some(error) = error {
             self.import_message = Some(format!("Import failed: {error}"));
             return;
         }
-        match self.state.import_candidates(candidates) {
-            Ok(n) => {
+        match self.state.import_candidates(candidates, &mut summary) {
+            Ok(()) => {
                 self.thumb_textures.clear();
-                self.import_message = Some(format!("Imported {n} new photos"));
+                self.import_message = Some(summary.message());
             }
             Err(e) => {
                 self.import_message = Some(format!("Import failed: {e}"));
@@ -798,8 +869,12 @@ pub(crate) fn walk_dir(dir: &std::path::Path, extensions: &[&str], out: &mut Vec
 fn process_import_paths(
     paths: Vec<PathBuf>,
     progress: &Arc<Mutex<ImportProgress>>,
-) -> Vec<ImportCandidate> {
+) -> (Vec<ImportCandidate>, ImportSummary) {
     let total = paths.len();
+    let mut summary = ImportSummary {
+        scanned: total,
+        ..ImportSummary::default()
+    };
     let mut candidates = Vec::new();
     for (idx, path) in paths.into_iter().enumerate() {
         {
@@ -816,6 +891,7 @@ fn process_import_paths(
             Ok(b) => b,
             Err(e) => {
                 log::warn!("skip {path:?}: {e}");
+                summary.record_failure(path, e.to_string());
                 continue;
             }
         };
@@ -824,9 +900,11 @@ fn process_import_paths(
             Ok(i) => i,
             Err(e) => {
                 log::warn!("skip {path:?}: {e}");
+                summary.record_failure(path, e.to_string());
                 continue;
             }
         };
+        summary.decoded += 1;
         let thumbnail = chalkraw_io::make_thumbnail(&img).unwrap_or_default();
         candidates.push(ImportCandidate {
             path,
@@ -837,7 +915,7 @@ fn process_import_paths(
             thumbnail,
         });
     }
-    candidates
+    (candidates, summary)
 }
 
 impl eframe::App for ChalkrawApp {
