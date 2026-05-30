@@ -13,7 +13,7 @@ const DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// Embedded sample image used when no fixture path is supplied or the
 /// supplied path doesn't exist.
-const EMBEDDED_FIXTURE: &[u8] = include_bytes!("../../../tests/fixtures/sample.jpg");
+const EMBEDDED_FIXTURE: &[u8; 27889] = include_bytes!("../../../tests/fixtures/sample.jpg");
 
 // ── AppState ─────────────────────────────────────────────────────────────────
 

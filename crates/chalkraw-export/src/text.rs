@@ -11,7 +11,7 @@ use ab_glyph::{Font, FontRef, Glyph, PxScale, ScaleFont};
 use image::{ImageBuffer, Rgba, RgbaImage};
 
 /// Embedded font bytes: DejaVu Sans Regular (SIL OFL 1.1).
-const FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/Default-Regular.ttf");
+const FONT_BYTES: &[u8; 759720] = include_bytes!("../assets/fonts/Default-Regular.ttf");
 
 /// Rasterise `text` at the given pixel height into a tight-fitting RGBA image.
 ///

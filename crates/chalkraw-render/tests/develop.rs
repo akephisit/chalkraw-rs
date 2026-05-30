@@ -9,8 +9,15 @@ use chalkraw_render::{
     BilateralPipeline, BlurPipeline, DevelopPipeline, EditUniforms, PipelineConfig, RenderDevice,
     SourceTexture,
 };
+use std::sync::{Mutex, MutexGuard};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+static GPU_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn gpu_test_lock() -> MutexGuard<'static, ()> {
+    GPU_TEST_LOCK.lock().unwrap()
+}
 
 fn solid_image(w: u32, h: u32, r: f32, g: f32, b: f32) -> Vec<f32> {
     (0..w * h).flat_map(|_| [r, g, b, 1.0_f32]).collect()
@@ -47,6 +54,7 @@ fn pixel_at(buf: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
 /// +50 contrast on a 0.7-grey pixel should push it further from 0.5 (brighter).
 #[test]
 fn contrast_plus_50_pushes_value_away_from_midgrey() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -76,6 +84,7 @@ fn contrast_plus_50_pushes_value_away_from_midgrey() {
 /// +50 shadows on a 0.2-grey pixel should brighten it.
 #[test]
 fn shadows_plus_50_brightens_dark_pixels() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -103,6 +112,7 @@ fn shadows_plus_50_brightens_dark_pixels() {
 /// Warm white balance (7500 K > 5500 K neutral) should shift red up and blue down.
 #[test]
 fn wb_warm_shifts_red_up_blue_down() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -129,6 +139,7 @@ fn wb_warm_shifts_red_up_blue_down() {
 /// -100 saturation on a solid red pixel should produce equal R=G=B (grey).
 #[test]
 fn saturation_minus_100_produces_grey() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -161,6 +172,7 @@ fn saturation_minus_100_produces_grey() {
 /// -100 vignette amount should darken the corner pixel relative to the centre.
 #[test]
 fn vignette_minus_100_darkens_corners() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -193,6 +205,7 @@ fn vignette_minus_100_darkens_corners() {
 /// (not every pixel identical), confirming the hash noise is being applied.
 #[test]
 fn grain_amount_50_introduces_variation() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -221,6 +234,7 @@ fn grain_amount_50_introduces_variation() {
 /// red hue, reducing R and increasing G (shifting toward orange/yellow).
 #[test]
 fn hsl_red_hue_shift_rotates_red() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -252,6 +266,7 @@ fn hsl_red_hue_shift_rotates_red() {
 /// while a solid red input with the same edit should remain saturated.
 #[test]
 fn hsl_blue_saturation_minus_100_desaturates_only_blue() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -287,6 +302,7 @@ fn hsl_blue_saturation_minus_100_desaturates_only_blue() {
 /// shadows.hue=240 (blue), shadows.saturation=100 → output B > R.
 #[test]
 fn cg_shadows_blue_tints_dark_pixels() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -315,6 +331,7 @@ fn cg_shadows_blue_tints_dark_pixels() {
 /// highlights.hue=60 (yellow), highlights.saturation=100 → output R+G > B.
 #[test]
 fn cg_highlights_yellow_tints_light_pixels() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -344,6 +361,7 @@ fn cg_highlights_yellow_tints_light_pixels() {
 /// Color Grading — global luminance -50 should darken any pixel.
 #[test]
 fn cg_global_lum_minus_50_darkens_all() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -373,6 +391,7 @@ fn cg_global_lum_minus_50_darkens_all() {
 /// Parametric curve shadows=+50 on a 0.1-grey pixel (deep shadow zone) should lift it.
 #[test]
 fn parametric_shadows_plus_50_lifts_dark_pixels() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -400,6 +419,7 @@ fn parametric_shadows_plus_50_lifts_dark_pixels() {
 /// Parametric curve highlights=-50 on a 0.9-grey pixel (bright zone) should dim it.
 #[test]
 fn parametric_highlights_minus_50_dims_bright_pixels() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -431,6 +451,7 @@ fn parametric_highlights_minus_50_dims_bright_pixels() {
 /// unchanged because r2 = 0 at (0.5, 0.5)).
 #[test]
 fn lens_distortion_positive_keeps_centre_unchanged() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -462,6 +483,7 @@ fn lens_distortion_positive_keeps_centre_unchanged() {
 /// brighter than the centre pixel (radial brightening compensates falloff).
 #[test]
 fn lens_vignetting_brightens_corner() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -497,6 +519,7 @@ fn lens_vignetting_brightens_corner() {
 /// should be darker than baseline (no crop, samples 0.5-grey average area).
 #[test]
 fn crop_enabled_top_left_quadrant_samples_correct_region() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -557,6 +580,7 @@ fn crop_enabled_top_left_quadrant_samples_correct_region() {
 /// After readback the centre pixel of both images should match closely.
 #[test]
 fn manual_srgb_encoding_matches_hardware_encoding() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -659,6 +683,7 @@ fn manual_srgb_encoding_matches_hardware_encoding() {
 /// Vibrance=0, but not exceed what full Saturation=+100 would do.
 #[test]
 fn vibrance_boosts_low_saturation_colors() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -695,6 +720,7 @@ fn vibrance_boosts_low_saturation_colors() {
 /// differs from the source on high-frequency content.
 #[test]
 fn sharpening_amount_100_changes_high_freq_edges() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -776,6 +802,7 @@ fn sharpening_amount_100_changes_high_freq_edges() {
 /// a value that differs from the source on such high-frequency content.
 #[test]
 fn clarity_plus_50_increases_contrast_on_textured_image() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -849,6 +876,7 @@ fn clarity_plus_50_increases_contrast_on_textured_image() {
 /// the source on that spatial frequency.
 #[test]
 fn texture_amount_50_changes_mid_freq_pattern() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -929,6 +957,7 @@ fn texture_amount_50_changes_mid_freq_pattern() {
 /// because the Gaussian blur used as the NR source smooths the noise.
 #[test]
 fn nr_luminance_100_smooths_noisy_source() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -1017,6 +1046,7 @@ fn nr_luminance_100_smooths_noisy_source() {
 /// contrast boost (biased toward darker regions) pushes the values apart.
 #[test]
 fn dehaze_positive_increases_contrast_on_hazy_pattern() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
@@ -1088,6 +1118,7 @@ fn dehaze_positive_increases_contrast_on_hazy_pattern() {
 /// completes on a sharp-edge source without crashing.
 #[test]
 fn bilateral_pipeline_smoke_test() {
+    let _gpu_test_guard = gpu_test_lock();
     let rd = match RenderDevice::new_headless() {
         Ok(rd) => rd,
         Err(_) => {
