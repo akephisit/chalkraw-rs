@@ -1,3 +1,4 @@
+use crate::app::CollectionFilter;
 use chalkraw_core::{interpolate_curve, EditState};
 use egui::Ui;
 
@@ -424,9 +425,45 @@ pub fn left_panel(ui: &mut Ui, state: &mut crate::app::AppState) -> bool {
     ui.add_space(8.0);
     ui.label("Collections");
     ui.indent("collections", |ui| {
-        ui.label("All");
-        ui.label("Picks");
-        ui.label("Rejected");
+        let all_count = state.photos_cache.len();
+        let picks_count = state
+            .photos_cache
+            .iter()
+            .filter(|p| p.flag == chalkraw_core::Flag::Pick)
+            .count();
+        let rejected_count = state
+            .photos_cache
+            .iter()
+            .filter(|p| p.flag == chalkraw_core::Flag::Reject)
+            .count();
+
+        if ui
+            .selectable_label(
+                state.collection_filter == CollectionFilter::All,
+                format!("All ({all_count})"),
+            )
+            .clicked()
+        {
+            state.collection_filter = CollectionFilter::All;
+        }
+        if ui
+            .selectable_label(
+                state.collection_filter == CollectionFilter::Picks,
+                format!("Picks ({picks_count})"),
+            )
+            .clicked()
+        {
+            state.collection_filter = CollectionFilter::Picks;
+        }
+        if ui
+            .selectable_label(
+                state.collection_filter == CollectionFilter::Rejected,
+                format!("Rejected ({rejected_count})"),
+            )
+            .clicked()
+        {
+            state.collection_filter = CollectionFilter::Rejected;
+        }
     });
     ui.add_space(8.0);
     ui.label("Presets");

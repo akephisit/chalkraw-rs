@@ -17,6 +17,14 @@ const EMBEDDED_FIXTURE: &[u8; 27889] = include_bytes!("../../../tests/fixtures/s
 
 // ── AppState ─────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CollectionFilter {
+    #[default]
+    All,
+    Picks,
+    Rejected,
+}
+
 pub struct AppState {
     pub edit: EditState,
     pub image: LinearImage,
@@ -28,6 +36,7 @@ pub struct AppState {
     pub dirty_since: Option<Instant>,
     pub new_preset_name: String,
     pub folder_filter: Option<std::path::PathBuf>,
+    pub collection_filter: CollectionFilter,
     pub watch_folder: Option<std::path::PathBuf>,
     pub last_watch_scan: Option<std::time::Instant>,
     /// Canvas zoom level. 1.0 = fit-to-panel. Range: 0.5..=16.0.
@@ -93,6 +102,7 @@ impl AppState {
             dirty_since: None,
             new_preset_name: String::new(),
             folder_filter: None,
+            collection_filter: CollectionFilter::All,
             watch_folder: None,
             last_watch_scan: None,
             canvas_zoom: 1.0,
@@ -221,10 +231,23 @@ impl AppState {
         Some(dir)
     }
 
+    pub fn visible_photos(&self) -> Vec<Photo> {
+        let mut photos = self.photos_cache.clone();
+        if let Some(filter) = &self.folder_filter {
+            photos.retain(|p| p.original_path.parent() == Some(filter.as_path()));
+        }
+        match self.collection_filter {
+            CollectionFilter::All => {}
+            CollectionFilter::Picks => photos.retain(|p| p.flag == Flag::Pick),
+            CollectionFilter::Rejected => photos.retain(|p| p.flag == Flag::Reject),
+        }
+        photos
+    }
+
     /// Navigate to the next (+1) or previous (−1) photo in the catalog.
     /// Wraps around at both ends (Lightroom convention).
     pub fn navigate(&mut self, delta: i32) -> anyhow::Result<()> {
-        let photos = self.photos_cache.clone();
+        let photos = self.visible_photos();
         if photos.is_empty() {
             return Ok(());
         }
@@ -857,6 +880,7 @@ impl eframe::App for ChalkrawApp {
             }
         }
 
+        let mut edit_change = EditChange::default();
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -922,10 +946,74 @@ impl eframe::App for ChalkrawApp {
                     }
                 });
                 ui.menu_button("Library", |ui| {
-                    ui.label("(Phase 3)");
+                    if ui.button("Import Photos…").clicked() {
+                        ui.close();
+                        if let Some(paths) = rfd::FileDialog::new()
+                            .add_filter(
+                                "Images",
+                                &[
+                                    "jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef",
+                                    "arw", "raf", "pef", "orf",
+                                ],
+                            )
+                            .pick_files()
+                        {
+                            self.start_import_paths(paths, "Import photos");
+                        }
+                    }
+                    if ui.button("Import Folder…").clicked() {
+                        ui.close();
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            self.start_import_folder(dir, "Import folder");
+                        }
+                    }
+                    ui.separator();
+                    if ui
+                        .selectable_label(
+                            self.state.collection_filter == CollectionFilter::All,
+                            "All Photos",
+                        )
+                        .clicked()
+                    {
+                        self.state.collection_filter = CollectionFilter::All;
+                    }
+                    if ui
+                        .selectable_label(
+                            self.state.collection_filter == CollectionFilter::Picks,
+                            "Picks",
+                        )
+                        .clicked()
+                    {
+                        self.state.collection_filter = CollectionFilter::Picks;
+                    }
+                    if ui
+                        .selectable_label(
+                            self.state.collection_filter == CollectionFilter::Rejected,
+                            "Rejected",
+                        )
+                        .clicked()
+                    {
+                        self.state.collection_filter = CollectionFilter::Rejected;
+                    }
                 });
                 ui.menu_button("Develop", |ui| {
-                    ui.label("(Phase 2)");
+                    if ui.button("Reset All Edits").clicked() {
+                        ui.close();
+                        self.state.edit = EditState::default();
+                        self.state.mark_dirty();
+                        edit_change.merge(EditChange::all());
+                    }
+                    if ui.button("Reset Crop").clicked() {
+                        ui.close();
+                        self.state.edit.crop = None;
+                        self.state.mark_dirty();
+                        edit_change.merge(EditChange::all());
+                    }
+                    if ui.button("Reset Zoom").clicked() {
+                        ui.close();
+                        self.state.canvas_zoom = 1.0;
+                        self.state.canvas_pan = egui::Vec2::ZERO;
+                    }
                 });
                 ui.menu_button("Export", |ui| {
                     if ui.button("Batch Export…").clicked() {
@@ -951,7 +1039,6 @@ impl eframe::App for ChalkrawApp {
             });
         });
 
-        let mut edit_change = EditChange::default();
         egui::SidePanel::left("left")
             .default_width(220.0)
             .show(ctx, |ui| {
@@ -971,13 +1058,12 @@ impl eframe::App for ChalkrawApp {
         egui::TopBottomPanel::bottom("filmstrip")
             .default_height(120.0)
             .show(ctx, |ui| {
-                let mut photos = self.state.photos_cache.clone();
-                if let Some(filter) = &self.state.folder_filter {
-                    photos.retain(|p| p.original_path.parent() == Some(filter.as_path()));
-                }
+                let photos = self.state.visible_photos();
                 if photos.is_empty() {
                     if self.state.folder_filter.is_some() {
                         ui.label("No photos in this folder.");
+                    } else if self.state.collection_filter != CollectionFilter::All {
+                        ui.label("No photos in this collection.");
                     } else {
                         ui.label("No photos yet. File → Import Photos / Import Folder…");
                     }
