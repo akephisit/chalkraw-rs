@@ -7,3 +7,4 @@ pub mod watermarks;
 
 pub use catalog::*;
 pub use error::*;
+pub use photos::PhotoPathUpdate;

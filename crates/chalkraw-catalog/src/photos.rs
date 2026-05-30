@@ -1,7 +1,17 @@
-use crate::catalog::{Catalog, PHOTOS_TABLE};
+use crate::catalog::{Catalog, EDITS_TABLE, PHOTOS_TABLE};
 use crate::error::CatalogError;
-use chalkraw_core::{Flag, Photo, PhotoId};
+use chalkraw_core::{Flag, ImageFormat, Photo, PhotoId};
 use redb::{ReadableDatabase, ReadableTable};
+use std::path::PathBuf;
+
+pub struct PhotoPathUpdate {
+    pub new_path: PathBuf,
+    pub new_hash: [u8; 32],
+    pub width: u32,
+    pub height: u32,
+    pub format: ImageFormat,
+    pub thumbnail: Vec<u8>,
+}
 
 impl Catalog {
     pub fn insert_photo(&self, photo: &Photo) -> Result<(), CatalogError> {
@@ -58,6 +68,36 @@ impl Catalog {
         self.insert_photo(&photo)
     }
 
+    pub fn remove_photo_with_edit(&self, id: PhotoId) -> Result<(), CatalogError> {
+        let write = self.db().begin_write()?;
+        {
+            let mut photos = write.open_table(PHOTOS_TABLE)?;
+            photos.remove(id.as_bytes())?;
+        }
+        {
+            let mut edits = write.open_table(EDITS_TABLE)?;
+            edits.remove(id.as_bytes())?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
+    pub fn update_photo_path(
+        &self,
+        id: PhotoId,
+        update: PhotoPathUpdate,
+    ) -> Result<Photo, CatalogError> {
+        let mut photo = self.get_photo(id)?;
+        photo.original_path = update.new_path;
+        photo.file_hash = update.new_hash;
+        photo.width = update.width;
+        photo.height = update.height;
+        photo.format = update.format;
+        photo.thumbnail = update.thumbnail;
+        self.insert_photo(&photo)?;
+        Ok(photo)
+    }
+
     pub fn find_photo_by_hash(&self, hash: &[u8; 32]) -> Result<Option<Photo>, CatalogError> {
         let read = self.db().begin_read()?;
         let tbl = read.open_table(PHOTOS_TABLE)?;
@@ -75,7 +115,8 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chalkraw_core::{Flag, ImageFormat, Photo};
+    use chalkraw_core::{EditState, Flag, ImageFormat, Photo};
+    use std::fs;
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -188,5 +229,63 @@ mod tests {
         assert_eq!(listed.len(), 2);
         assert!(listed.contains(&p1));
         assert!(listed.contains(&p2));
+    }
+
+    #[test]
+    fn remove_photo_with_edit_removes_catalog_rows_not_original_file() {
+        let (dir, cat) = cat();
+        let original = dir.path().join("source.jpg");
+        fs::write(&original, b"not a real image").unwrap();
+        let p = Photo::new(original.clone(), [3u8; 32], 10, 12, ImageFormat::Jpeg);
+        cat.insert_photo(&p).unwrap();
+
+        let mut edit = EditState::default();
+        edit.tone.exposure = 2.0;
+        cat.upsert_edit(p.id, &edit).unwrap();
+
+        cat.remove_photo_with_edit(p.id).unwrap();
+
+        assert!(original.exists());
+        assert!(matches!(
+            cat.get_photo(p.id),
+            Err(CatalogError::PhotoNotFound(id)) if id == p.id
+        ));
+        assert_eq!(cat.get_edit(p.id).unwrap().tone.exposure, 0.0);
+    }
+
+    #[test]
+    fn update_photo_path_relinks_path_and_metadata() {
+        let (_dir, cat) = cat();
+        let p = Photo::new(
+            PathBuf::from("/old/source.jpg"),
+            [4u8; 32],
+            10,
+            12,
+            ImageFormat::Jpeg,
+        );
+        cat.insert_photo(&p).unwrap();
+
+        let updated = cat
+            .update_photo_path(
+                p.id,
+                PhotoPathUpdate {
+                    new_path: PathBuf::from("/new/source.png"),
+                    new_hash: [5u8; 32],
+                    width: 20,
+                    height: 24,
+                    format: ImageFormat::Png,
+                    thumbnail: vec![9, 8, 7],
+                },
+            )
+            .unwrap();
+
+        assert_eq!(updated.id, p.id);
+        assert_eq!(updated.original_path, PathBuf::from("/new/source.png"));
+        assert_eq!(updated.file_hash, [5u8; 32]);
+        assert_eq!(updated.width, 20);
+        assert_eq!(updated.height, 24);
+        assert_eq!(updated.format, ImageFormat::Png);
+        assert_eq!(updated.thumbnail, vec![9, 8, 7]);
+        assert_eq!(cat.get_photo(p.id).unwrap(), updated);
     }
 }

@@ -41,16 +41,16 @@ wiring.
 **Purpose:** Preserve the already-started fix that makes Library/Develop visible and
 usable from the UI instead of only from side panels or shortcuts.
 
-- [ ] Verify the current working-tree changes:
+- [x] Verify the current working-tree changes:
   - `Library` menu has Import Photos, Import Folder, All Photos, Picks, Rejected.
   - `Develop` menu has Reset All Edits, Reset Crop, Reset Zoom.
   - Left-panel Collections are clickable and show counts.
   - Filmstrip and keyboard navigation use the active folder/collection filter.
-- [ ] Run:
+- [x] Run:
   - `cargo fmt --check`
   - `cargo check --workspace --all-targets`
   - `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] Commit:
+- [x] Commit:
   - `git add crates/chalkraw-ui/src/app.rs crates/chalkraw-ui/src/panels.rs docs/superpowers/plans/2026-05-30-library-develop-usability.md`
   - `git commit -m "Wire library and develop UI menus"`
 
@@ -59,23 +59,23 @@ usable from the UI instead of only from side panels or shortcuts.
 **Purpose:** A user should be able to import a folder, find photos, flag them, and
 navigate without guessing what is happening.
 
-- [ ] Add a visible import result summary:
+- [x] Add a visible import result summary:
   - Introduce an `ImportReport` / `ImportSummary` model before changing UI copy.
   - Track scanned count, decoded count, duplicate count, inserted count, failed count.
   - Track the first few failures as `(path, reason)` for display.
-- [ ] Replace the current import completion path:
+- [x] Replace the current import completion path:
   - `process_import_paths` should return candidates plus report data, not only
     successful candidates.
   - `finish_import_if_ready` should display the report instead of only
     `Imported {n} new photos`.
   - Duplicates found during final insertion should be reflected in the summary,
     because concurrent import/watch-folder scans can discover already-known hashes.
-- [ ] Add catalog APIs required by selected-photo actions:
+- [x] Add catalog APIs required by selected-photo actions:
   - `remove_photo(photo_id)`.
   - `remove_edit(photo_id)` or `remove_photo_with_edit(photo_id)`.
   - `update_photo_path(photo_id, new_path, new_hash, width, height, format, thumbnail)`.
   - tests proving remove does not delete the original source file.
-- [ ] Add catalog actions for the selected/current photo:
+- [x] Add catalog actions for the selected/current photo:
   - Remove from catalog, without deleting the original file.
   - Reveal missing/original path state in the UI.
   - Relink missing file by choosing a replacement path.

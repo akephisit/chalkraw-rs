@@ -172,6 +172,102 @@ impl AppState {
         Ok(())
     }
 
+    pub fn remove_current_photo_from_catalog(&mut self) -> anyhow::Result<PhotoId> {
+        let removed_id = self.photo_id;
+        let removed_hash = self
+            .photos_cache
+            .iter()
+            .find(|p| p.id == removed_id)
+            .map(|p| p.file_hash)
+            .ok_or_else(|| anyhow::anyhow!("current photo {removed_id} is not in the catalog"))?;
+
+        if self.photos_cache.len() <= 1 {
+            anyhow::bail!("cannot remove the only photo in the catalog");
+        }
+
+        let visible = self.visible_photos();
+        let mut next_paths: Vec<PathBuf> = Vec::new();
+        if visible.len() > 1 {
+            let current_idx = visible.iter().position(|p| p.id == removed_id).unwrap_or(0);
+            for offset in 1..visible.len() {
+                let idx = (current_idx + offset) % visible.len();
+                next_paths.push(visible[idx].original_path.clone());
+            }
+        }
+        if next_paths.is_empty() {
+            self.folder_filter = None;
+            self.collection_filter = CollectionFilter::All;
+            next_paths.extend(
+                self.photos_cache
+                    .iter()
+                    .filter(|p| p.id != removed_id)
+                    .map(|p| p.original_path.clone()),
+            );
+        }
+
+        let mut last_error: Option<anyhow::Error> = None;
+        for path in next_paths {
+            match self.switch_to_path(path) {
+                Ok(()) => {
+                    self.catalog.remove_photo_with_edit(removed_id)?;
+                    self.photos_cache.retain(|p| p.id != removed_id);
+                    self.photo_hashes.remove(&removed_hash);
+                    return Ok(removed_id);
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no replacement photo available")))
+    }
+
+    pub fn relink_current_photo(&mut self, new_path: PathBuf) -> anyhow::Result<PhotoId> {
+        let bytes = std::fs::read(&new_path)?;
+        let image = chalkraw_io::decode_image_from_bytes(&new_path, &bytes)
+            .map_err(|e| anyhow::anyhow!("decode {new_path:?}: {e}"))?;
+        let hash: [u8; 32] = *blake3::hash(&bytes).as_bytes();
+        if self
+            .photos_cache
+            .iter()
+            .any(|p| p.id != self.photo_id && p.file_hash == hash)
+        {
+            anyhow::bail!("replacement file is already imported");
+        }
+
+        let thumbnail = chalkraw_io::make_thumbnail(&image).unwrap_or_default();
+        let old_hash = self
+            .photos_cache
+            .iter()
+            .find(|p| p.id == self.photo_id)
+            .map(|p| p.file_hash);
+        let updated = self.catalog.update_photo_path(
+            self.photo_id,
+            chalkraw_catalog::PhotoPathUpdate {
+                new_path,
+                new_hash: hash,
+                width: image.width,
+                height: image.height,
+                format: image.format,
+                thumbnail,
+            },
+        )?;
+
+        if let Some(old_hash) = old_hash {
+            self.photo_hashes.remove(&old_hash);
+        }
+        self.photo_hashes.insert(hash);
+        if let Some(photo) = self.photos_cache.iter_mut().find(|p| p.id == self.photo_id) {
+            *photo = updated.clone();
+        }
+        self.image = image;
+        self.current_flag = updated.flag;
+        self.canvas_zoom = 1.0;
+        self.canvas_pan = egui::Vec2::ZERO;
+        Ok(updated.id)
+    }
+
     pub fn set_current_flag(&mut self, flag: Flag) {
         if let Err(e) = self.catalog.update_flag(self.photo_id, flag) {
             log::warn!("set flag failed: {e}");
@@ -1045,6 +1141,66 @@ impl eframe::App for ChalkrawApp {
                             self.start_import_folder(dir, "Import folder");
                         }
                     }
+                    ui.separator();
+                    let current_path = self
+                        .state
+                        .photos_cache
+                        .iter()
+                        .find(|p| p.id == self.state.photo_id)
+                        .map(|p| p.original_path.clone());
+                    if let Some(path) = &current_path {
+                        if path.as_os_str() != "<embedded>" && !path.exists() {
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                format!("Missing original: {}", path.display()),
+                            );
+                        }
+                    }
+                    if ui.button("Relink Current Photo…").clicked() {
+                        ui.close();
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(
+                                "Images",
+                                &[
+                                    "jpg", "jpeg", "png", "tif", "tiff", "cr2", "cr3", "nef",
+                                    "arw", "raf", "pef", "orf",
+                                ],
+                            )
+                            .pick_file()
+                        {
+                            match self.state.relink_current_photo(path) {
+                                Ok(id) => {
+                                    self.gpu = None;
+                                    self.thumb_textures.remove(&id);
+                                    self.import_message =
+                                        Some("Relinked current photo".to_string());
+                                }
+                                Err(e) => {
+                                    self.import_message = Some(format!("Relink failed: {e}"));
+                                    log::warn!("relink current photo failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                    ui.add_enabled_ui(self.state.photos_cache.len() > 1, |ui| {
+                        if ui.button("Remove Current From Catalog").clicked() {
+                            ui.close();
+                            match self.state.remove_current_photo_from_catalog() {
+                                Ok(id) => {
+                                    self.gpu = None;
+                                    self.thumb_textures.remove(&id);
+                                    self.import_message = Some(
+                                        "Removed current photo from catalog; original file kept"
+                                            .to_string(),
+                                    );
+                                }
+                                Err(e) => {
+                                    self.import_message = Some(format!("Remove failed: {e}"));
+                                    log::warn!("remove current photo failed: {e}");
+                                }
+                            }
+                        }
+                    });
                     ui.separator();
                     if ui
                         .selectable_label(
